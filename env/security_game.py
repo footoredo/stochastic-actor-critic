@@ -62,7 +62,13 @@ class SecurityGame(object):
     def _get_ob(self, atk_type, belief, i_round):
         return [self._get_atk_ob(atk_type, belief, i_round), self._get_dfd_ob(belief, i_round)]
 
+    def generate_belief(self):
+        x = [0.] + sorted(np.random.rand(self.n_types - 1).tolist()) + [1.]
+        for i in range(self.n_types):
+            self.prior[i] = x[i + 1] - x[i]
+
     def reset(self):
+        self.generate_belief()
         self.belief = np.copy(self.prior)
         self.i_round = 0
         self.atk_type = np.random.choice(range(self.n_types), p=self.prior)

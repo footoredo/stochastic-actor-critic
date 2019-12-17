@@ -25,7 +25,7 @@ parser.add_argument('--log-interval', type=int, default=10, metavar='N',
 args = parser.parse_args()
 
 
-env = SecurityGame(n_slots=2, n_types=2, prior=np.array([0.5, 0.5]), n_rounds=1, seed=args.seed)
+env = SecurityGame(n_slots=2, n_types=2, prior=np.array([0.6, 0.4]), n_rounds=1, seed=args.seed)
 torch.manual_seed(args.seed)
 
 
@@ -56,6 +56,11 @@ class Critic(nn.Module):
         y = self.affine2(y)
         return y
 
+    def average(self, other, k):
+        self.affine1.weight.data = (1 - k) * self.affine1.weight.data + k * other.affine1.weight.data
+        self.affine1.bias.data = (1 - k) * self.affine1.bias.data + k * other.affine1.bias.data
+        self.affine2.weight.data = (1 - k) * self.affine2.weight.data + k * other.affine2.weight.data
+        self.affine2.bias.data = (1 - k) * self.affine2.bias.data + k * other.affine2.bias.data
 
 class Actor(nn.Module):
     def __init__(self, ob_len):
@@ -69,8 +74,7 @@ class Actor(nn.Module):
         y = F.softmax(y, dim=-1)
         return y
 
-    def average(self, other, n):
-        k = 1. / n
+    def average(self, other, k):
         self.affine1.weight.data = (1 - k) * self.affine1.weight.data + k * other.affine1.weight.data
         self.affine1.bias.data = (1 - k) * self.affine1.bias.data + k * other.affine1.bias.data
         self.affine2.weight.data = (1 - k) * self.affine2.weight.data + k * other.affine2.weight.data
@@ -120,12 +124,17 @@ dfd_actor = Actor(n_types + n_rounds)
 avg_dfd_actor = Actor(n_types + n_rounds)
 atk_critic = Critic()
 dfd_critic = Critic()
-atk_model = Model(atk_actor, dfd_actor, atk_critic)
-dfd_model = Model(atk_actor, dfd_actor, dfd_critic)
+target_atk_critic = Critic()
+target_dfd_critic = Critic()
+cnt_c = 1
+target_atk_critic.average(atk_critic, 1. / cnt_c)
+target_dfd_critic.average(dfd_critic, 1. / cnt_c)
+atk_model = Model(atk_actor, dfd_actor, target_atk_critic)
+dfd_model = Model(atk_actor, dfd_actor, target_dfd_critic)
 
 cnt = 1
-avg_atk_actor.average(atk_actor, cnt)
-avg_dfd_actor.average(dfd_actor, cnt)
+avg_atk_actor.average(atk_actor, 1. / cnt)
+avg_dfd_actor.average(dfd_actor, 1. / cnt)
 
 atk_critic_optimizer = optim.Adam(atk_critic.parameters(), lr=critic_lr)
 dfd_critic_optimizer = optim.Adam(dfd_critic.parameters(), lr=critic_lr)
@@ -184,34 +193,40 @@ critic_criterion = nn.MSELoss()
 for i in range(5000):
     print("--- iter {} ---".format(i))
 
-    atk_obs, dfd_obs, atk_probs, dfd_probs, atk_acs, dfd_acs, atk_rews, dfd_rews = collect(64)
+    atk_obs, dfd_obs, atk_probs, dfd_probs, atk_acs, dfd_acs, atk_rews, dfd_rews = collect(500)
     priors, rs, atk_types = torch.split(ts(atk_obs), [n_types, n_rounds, n_types], dim=1)
     atk_probs = torch.stack(atk_probs)
     dfd_probs = torch.stack(dfd_probs)
     atk_acs = one_hot(n_slots, atk_acs)
     dfd_acs = one_hot(n_slots, dfd_acs)
 
+    # cnt_c += 1
+
     atk_critic_optimizer.zero_grad()
     atk_critic_result = atk_critic(priors, rs, atk_types, atk_probs, atk_acs, dfd_probs, dfd_acs)
     # print(atk_critic_result)
     print(atk_rews[0], atk_critic_result.data[0])
     atk_critic_loss = critic_criterion(ts(atk_rews).unsqueeze(-1), atk_critic_result)
-    if i < 2000:
-        atk_critic_loss.backward(retain_graph=True)
-        atk_critic_optimizer.step()
+    # if i < 2000:
+    atk_critic_loss.backward(retain_graph=True)
+    atk_critic_optimizer.step()
+
+    target_atk_critic.average(atk_critic, 1. / cnt_c)
 
     dfd_critic_optimizer.zero_grad()
     dfd_critic_result = dfd_critic(priors, rs, atk_types, atk_probs, atk_acs, dfd_probs, dfd_acs)
     print(dfd_rews[0], dfd_critic_result.data[0])
     dfd_critic_loss = critic_criterion(ts(dfd_rews).unsqueeze(-1), dfd_critic_result)
-    if i < 2000:
-        dfd_critic_loss.backward(retain_graph=True)
-        dfd_critic_optimizer.step()
+    # if i < 2000:
+    dfd_critic_loss.backward(retain_graph=True)
+    dfd_critic_optimizer.step()
+
+    target_dfd_critic.average(dfd_critic, 1. / cnt_c)
 
     print(atk_critic_loss.data)
     print(dfd_critic_loss.data)
 
-    if i >= 200:
+    if i >= 0:
         atk_actor_optimizer.zero_grad()
         atk_actor_loss = -atk_model(priors, rs, atk_types).mean()
         atk_actor_loss.backward(retain_graph=True)
@@ -233,8 +248,12 @@ for i in range(5000):
 
         print("avg")
         cnt += 1
-        avg_atk_actor.average(atk_actor, cnt)
-        avg_dfd_actor.average(dfd_actor, cnt)
-        print(avg_atk_actor(ts([[0.5, 0.5, 1., 1., 0.]])).data[0],
-              avg_atk_actor(ts([[0.5, 0.5, 1., 0., 1.]])).data[0])
-        print(avg_dfd_actor(ts([[0.5, 0.5, 1.]])).data[0])
+        avg_atk_actor.average(atk_actor, 1. / cnt)
+        avg_dfd_actor.average(dfd_actor, 1. / cnt)
+
+        for i in range(11):
+            p0 = i / 10.
+            p1 = 1 - i / 10.
+            print(avg_atk_actor(ts([[p0, p1, 1., 1., 0.]])).data[0],
+                  avg_atk_actor(ts([[p0, p1, 1., 0., 1.]])).data[0])
+            print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
