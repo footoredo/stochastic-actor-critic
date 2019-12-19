@@ -16,13 +16,14 @@ def update_belief(belief, prob):
 
 
 class SecurityGame(object):
-    def __init__(self, n_slots, n_types, prior, n_rounds, value_low=5., value_high=10., seed=None):
+    def __init__(self, n_slots, n_types, prior, n_rounds, value_low=5., value_high=10., seed=None, random_prior=False):
         self.n_slots = n_slots
         self.n_types = n_types
         self.prior = prior if prior is not None else np.random.rand(n_types)
         self.prior /= np.sum(self.prior)
         self.n_rounds = n_rounds
         self.seed = seed
+        self.random_prior = random_prior
 
         if seed is not None:
             np.random.seed(int(seed))
@@ -68,7 +69,8 @@ class SecurityGame(object):
             self.prior[i] = x[i + 1] - x[i]
 
     def reset(self):
-        self.generate_belief()
+        if self.random_prior:
+            self.generate_belief()
         self.belief = np.copy(self.prior)
         self.i_round = 0
         self.atk_type = np.random.choice(range(self.n_types), p=self.prior)
