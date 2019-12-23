@@ -24,8 +24,8 @@ parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                     help='interval between training status logs (default: 10)')
 args = parser.parse_args()
 
-
-env = SecurityGame(n_slots=2, n_types=2, prior=np.array([0.6, 0.4]), n_rounds=1, seed=args.seed)
+p = 6
+env = SecurityGame(n_slots=2, n_types=2, prior=np.array([p / 10, 1 - p / 10]), n_rounds=1, seed=args.seed)
 payoff = env.payoff
 torch.manual_seed(args.seed)
 
@@ -153,46 +153,35 @@ def collect(n):
     atk_ob, dfd_ob = env.reset()
     atk_obs = []
     dfd_obs = []
-    atk_probs = []
-    dfd_probs = []
-    atk_acs = []
-    dfd_acs = []
-    atk_rews = []
-    dfd_rews = []
     for i in range(n):
         atk_obs.append(atk_ob)
         dfd_obs.append(dfd_ob)
-        atk_prob = atk_actor(torch.tensor([atk_ob], dtype=torch.float))[0]
-        dfd_prob = dfd_actor(torch.tensor([dfd_ob], dtype=torch.float))[0]
-        atk_ac = sample_action(atk_prob)
-        dfd_ac = sample_action(dfd_prob)
-        obs, rews, done, _ = env.step([atk_ac, dfd_ac])
+        atk_ob, dfd_ob = env.reset()
 
-        atk_ob, dfd_ob = obs
-        atk_rew, dfd_rew = rews
+    return atk_obs, dfd_obs
 
-        atk_probs.append(atk_prob)
-        dfd_probs.append(dfd_prob)
-        atk_acs.append(atk_ac)
-        dfd_acs.append(dfd_ac)
-        atk_rews.append(atk_rew)
-        dfd_rews.append(dfd_rew)
 
-        if done:
-            atk_ob, dfd_ob = env.reset()
+class Strategy(object):
+    def __init__(self, actor):
+        self.actor = actor
 
-    return atk_obs, dfd_obs, atk_probs, dfd_probs, atk_acs, dfd_acs, atk_rews, dfd_rews
+    def strategy(self, ob):
+        return self.actor(torch.Tensor([ob])).data[0].numpy()
+
+    def act(self, ob):
+        s = self.strategy(ob)
+        return sample_action(s)
+
+    def prob(self, ob, a):
+        s = self.strategy(ob)
+        return s[a]
 
 
 for i in range(5000):
     print("--- iter {} ---".format(i))
 
-    atk_obs, dfd_obs, atk_probs, dfd_probs, atk_acs, dfd_acs, atk_rews, dfd_rews = collect(500)
+    atk_obs, dfd_obs = collect(500)
     priors, rs, atk_types = torch.split(ts(atk_obs), [n_types, n_rounds, n_types], dim=1)
-    atk_probs = torch.stack(atk_probs)
-    dfd_probs = torch.stack(dfd_probs)
-    atk_acs = one_hot(n_slots, atk_acs)
-    dfd_acs = one_hot(n_slots, dfd_acs)
 
     # cnt_c += 1
 
@@ -201,10 +190,6 @@ for i in range(5000):
         atk_actor_loss = -atk_model(priors, rs, atk_types).mean()
         atk_actor_loss.backward(retain_graph=True)
         atk_actor_optimizer.step()
-
-        print(atk_actor_loss.data)
-        print(atk_actor(ts([[0.5, 0.5, 1., 1., 0.]])).data[0],
-              atk_actor(ts([[0.5, 0.5, 1., 0., 1.]])).data[0])
 
         dfd_actor_optimizer.zero_grad()
         dfd_actor_loss = -dfd_model(priors, rs, atk_types).mean()
@@ -221,9 +206,11 @@ for i in range(5000):
         avg_atk_actor.average(atk_actor, 1. / cnt)
         avg_dfd_actor.average(dfd_actor, 1. / cnt)
 
-        for i in range(11):
-            p0 = i / 10.
-            p1 = 1 - i / 10.
-            print(avg_atk_actor(ts([[p0, p1, 1., 1., 0.]])).data[0],
-                  avg_atk_actor(ts([[p0, p1, 1., 0., 1.]])).data[0])
-            print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
+        # for p in range(11):
+        p0 = p / 10.
+        p1 = 1 - p / 10.
+        print(avg_atk_actor(ts([[p0, p1, 1., 1., 0.]])).data[0],
+              avg_atk_actor(ts([[p0, p1, 1., 0., 1.]])).data[0])
+        print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
+
+        env.assess_strategies((Strategy(atk_actor), Strategy(dfd_actor)))
