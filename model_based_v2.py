@@ -185,9 +185,9 @@ class Strategy(object):
         return s[a]
 
 
-for i in range(50000):
+for i in range(5000):
 
-    atk_obs, dfd_obs = collect(100)
+    atk_obs, dfd_obs = collect(1)
     priors, rs, atk_types = torch.split(ts(atk_obs), [n_types, n_rounds, n_types], dim=1)
 
     # cnt_c += 1
@@ -222,7 +222,7 @@ for i in range(50000):
         avg_atk_actor.average(atk_actor, 1. / cnt)
         avg_dfd_actor.average(dfd_actor, 1. / cnt)
 
-        if i % 10 == 9:
+        if i % 100 == 99:
             print("--- iter {} ---".format(i))
             print("avg")
             # for p in range(11):
