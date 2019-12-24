@@ -28,7 +28,7 @@ parser.add_argument('--prior', type=float, nargs='+')
 args = parser.parse_args()
 
 
-env = SecurityGame(n_slots=2, n_types=2, prior=np.array(args.prior), n_rounds=1, seed=args.seed, random_prior=False)
+env = SecurityGame(n_slots=2, n_types=2, prior=np.array(args.prior), n_rounds=1, seed=args.seed, random_prior=True)
 payoff = env.payoff
 torch.manual_seed(args.seed)
 
@@ -110,56 +110,6 @@ class Actor(nn.Module):
         self.affine2.bias.data = (1 - k) * self.affine2.bias.data + k * other.affine2.bias.data
 
 
-class Pack(nn.Module):
-    def __init__(self, samples, p=2):
-        super(Pack, self).__init__()
-        self.samples = []
-        self.v_dim = samples[0][1].shape[0]
-        for k, v in samples:
-            self.samples.append((ts(k), ts(v)))
-        self.p = p
-
-    def forward(self, b):
-        sum_w = torch.zeros(b.size()[0])
-        sum_v = torch.zeros([b.size()[0], self.v_dim])
-        for k, v in self.samples:
-            dis = torch.norm(k - b, dim=1)
-            # print(b.size())
-            w = torch.div(torch.ones_like(dis), torch.clamp(torch.pow(dis, self.p), min=1e-6))
-            sum_w += w
-            sum_v += torch.ger(w, v)
-        return sum_v / sum_w
-
-
-sss = """-0.1931300893	0.961026482	0.7378740233
--0.1030614502	0.9524352491	0.7353386552
--0.2182349191	0.9660896315	0.7358214949
--0.1975423002	0.96085326	0.7358739475
--0.1973181798	0.9607963711	0.7358709263
--0.1978641531	0.9614468715	0.7358740167
--0.8089985514	1.73586039	0.7358769881
--0.8093295141	1.736104729	0.7358607003
--0.8094510535	1.736082369	0.7358952676
--0.8095254252	1.735848667	0.7358598875
--0.8102910921	1.716189773	0.7317437907"""
-
-sss = np.array(list(map(float, sss.split()))).reshape((11, n_types + 1))
-atk_vn = []
-for t in range(n_types):
-    samples = []
-    for p in range(11):
-        samples.append((np.array([p / 10, (10 - p) / 10]), sss[p, t].reshape(1)))
-    atk_vn.append(Pack(samples))
-
-samples = []
-for p in range(11):
-    samples.append((np.array([p / 10, (10 - p) / 10]), sss[p, n_types].reshape(1)))
-dfd_vn = Pack(samples)
-
-
-# print(atk_vn[0](ts([[0.6, 0.4]])))
-
-
 class Model(nn.Module):
     def __init__(self, atk_actor, dfd_actor, critic, is_atk, vn=None):
         super(Model, self).__init__()
@@ -197,22 +147,11 @@ class Model(nn.Module):
             for a in range(n_slots):
                 atk_ac = torch.zeros((batch_size, n_slots))
                 atk_ac[:, a] = 1.
-                new_prior = batch_bayes(prior.unsqueeze(-1), atk_s, atk_ac.unsqueeze(-1))
                 # print(prior, atk_s, atk_ac, new_prior)
                 for b in range(n_slots):
                     dfd_ac[:, b] = 1.
 
                     c = self.critic(prior, r, atk_tp, atk_prob, atk_ac, dfd_prob, dfd_ac)
-
-                    cc = ts(0.)
-                    if self.vn is not None:
-                        if type(self.vn) == list:
-                            cc = self.vn[t](new_prior)
-                        else:
-                            cc = self.vn(new_prior)
-
-                    # print(c, cc)
-                    c += cc.detach()
 
                     # print(c)
 
@@ -289,7 +228,7 @@ class Strategy(object):
 
 for i in range(5000):
 
-    atk_obs, dfd_obs = collect(1)
+    atk_obs, dfd_obs = collect(100)
     priors, rs, atk_types = torch.split(ts(atk_obs), [n_types, n_rounds, n_types], dim=1)
 
     # cnt_c += 1
@@ -331,12 +270,13 @@ for i in range(5000):
                 # p = 9
             # p0 = p / 10.
             # p1 = (10 - p) / 10.
-            p0 = args.prior[0]
-            p1 = args.prior[1]
-            print(p0, p1)
-            print(avg_atk_actor(ts([[p0, p1, 1., 1., 0.]])).data[0],
-                  avg_atk_actor(ts([[p0, p1, 1., 0., 1.]])).data[0])
-            print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
+            # for p in range(11):
+            # p0 = args.prior[0]
+            # p1 = args.prior[1]
+            # print(p0, p1)
+            # print(avg_atk_actor(ts([[p0, p1, 1., 1., 0.]])).data[0],
+            #       avg_atk_actor(ts([[p0, p1, 1., 0., 1.]])).data[0])
+            # print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
 
             env.assess_strategies((Strategy(avg_atk_actor), Strategy(avg_dfd_actor)))
 

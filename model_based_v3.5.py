@@ -28,7 +28,11 @@ parser.add_argument('--prior', type=float, nargs='+')
 args = parser.parse_args()
 
 
-env = SecurityGame(n_slots=2, n_types=2, prior=np.array(args.prior), n_rounds=1, seed=args.seed, random_prior=False)
+n_rounds = 2
+n_types = 2
+n_slots = 2
+
+env = SecurityGame(n_slots=n_slots, n_types=n_types, prior=np.array(args.prior), n_rounds=n_rounds, seed=args.seed, random_prior=False)
 payoff = env.payoff
 torch.manual_seed(args.seed)
 
@@ -36,9 +40,6 @@ torch.manual_seed(args.seed)
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 
-n_rounds = 1
-n_types = 2
-n_slots = 2
 
 hid_size = 32
 
@@ -148,7 +149,8 @@ atk_vn = []
 for t in range(n_types):
     samples = []
     for p in range(11):
-        samples.append((np.array([p / 10, (10 - p) / 10]), sss[p, t].reshape(1)))
+        s = sss[p, t]
+        samples.append((np.array([p / 10, (10 - p) / 10]), np.array([s])))
     atk_vn.append(Pack(samples))
 
 samples = []
@@ -156,6 +158,35 @@ for p in range(11):
     samples.append((np.array([p / 10, (10 - p) / 10]), sss[p, n_types].reshape(1)))
 dfd_vn = Pack(samples)
 
+
+sss = """2.86E-04	0.4409418404	0.5237062573
+2.95E-04	0.5085167885	0.5305569172
+2.51E-04	0.5788279772	0.5217934847
+2.13E-04	0.6609868407	0.5233629942
+1.90E-04	0.7711823583	0.5233777165
+1.81E-04	0.9253284931	0.523335278
+0.1047477648	0.9997623563	0.4768837988
+0.2326373458	0.9997294545	0.4768662751
+0.3285026252	0.9996944666	0.4768645167
+0.4031127989	0.9996393919	0.476873666
+0.4656899869	0.9995920062	0.4780492485"""
+
+sss = np.array(list(map(float, sss.split()))).reshape((11, n_types + 1))
+atk_sn = []
+for t in range(n_types):
+    samples = []
+    for p in range(11):
+        s = sss[p, t]
+        s = np.array([s, 1. - s])
+        samples.append((np.array([p / 10, (10 - p) / 10]), s))
+    atk_sn.append(Pack(samples))
+
+samples = []
+for p in range(11):
+    s = sss[p, n_types]
+    s = np.array([s, 1. - s])
+    samples.append((np.array([p / 10, (10 - p) / 10]), s))
+dfd_sn = Pack(samples)
 
 # print(atk_vn[0](ts([[0.6, 0.4]])))
 
@@ -212,7 +243,7 @@ class Model(nn.Module):
                             cc = self.vn(new_prior)
 
                     # print(c, cc)
-                    c += cc.detach()
+                    c += cc
 
                     # print(c)
 
@@ -227,7 +258,6 @@ class Model(nn.Module):
 
         return y
 
-
 critic_lr = 3e-2
 actor_lr = 1e-3
 
@@ -237,8 +267,8 @@ dfd_actor = Actor(n_types + n_rounds)
 avg_dfd_actor = Actor(n_types + n_rounds)
 atk_critic = Critic(payoff[:, :, :, 0])
 dfd_critic = Critic(payoff[:, :, :, 1])
-atk_model = Model(atk_actor, dfd_actor, atk_critic, True)
-dfd_model = Model(atk_actor, dfd_actor, dfd_critic, False)
+atk_model = Model(atk_actor, dfd_actor, atk_critic, True, vn=atk_vn)
+dfd_model = Model(atk_actor, dfd_actor, dfd_critic, False, vn=dfd_vn)
 
 cnt = 1
 avg_atk_actor.average(atk_actor, 1. / cnt)
@@ -272,11 +302,25 @@ def collect(n):
 
 
 class Strategy(object):
-    def __init__(self, actor):
+    def __init__(self, actor, sn=None):
         self.actor = actor
+        self.sn = sn
 
     def strategy(self, ob):
-        return self.actor(ts([ob])).data[0].cpu().numpy()
+        prior, r, atk_type = np.split(ob, [n_types, n_rounds + n_types])
+        # print(ob)
+        # print(prior, r, atk_type)
+        if r[0] > 0.5:
+            s = self.actor(ts([ob])).data[0].cpu().numpy()
+            # print(s)
+            return s
+        else:
+            if type(self.sn) == list:
+                for t in range(n_types):
+                    if atk_type[t] > 0.5:
+                        return self.sn[t](ts([prior])).data[0].cpu().numpy()
+            else:
+                return self.sn(ts([prior])).data[0].cpu().numpy()
 
     def act(self, ob):
         s = self.strategy(ob)
@@ -326,6 +370,7 @@ for i in range(5000):
 
         if i % 100 == 99:
             print("--- iter {} ---".format(i))
+            print("--- iter {} ---".format(i))
             print("avg")
             # for p in range(11):
                 # p = 9
@@ -334,9 +379,9 @@ for i in range(5000):
             p0 = args.prior[0]
             p1 = args.prior[1]
             print(p0, p1)
-            print(avg_atk_actor(ts([[p0, p1, 1., 1., 0.]])).data[0],
-                  avg_atk_actor(ts([[p0, p1, 1., 0., 1.]])).data[0])
-            print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
+            print(avg_atk_actor(ts([[p0, p1, 1., 0., 1., 0.]])).data[0],
+                  avg_atk_actor(ts([[p0, p1, 1., 0., 0., 1.]])).data[0])
+            print(avg_dfd_actor(ts([[p0, p1, 1., 0.]])).data[0])
 
-            env.assess_strategies((Strategy(avg_atk_actor), Strategy(avg_dfd_actor)))
-
+            # env.assess_strategies((Strategy(avg_atk_actor, atk_sn), Strategy(avg_dfd_actor, dfd_sn)))
+            env.assess_strategies((Strategy(atk_actor, atk_sn), Strategy(dfd_actor, dfd_sn)))
