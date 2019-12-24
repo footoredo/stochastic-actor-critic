@@ -383,5 +383,5 @@ for i in range(5000):
                   avg_atk_actor(ts([[p0, p1, 1., 0., 0., 1.]])).data[0])
             print(avg_dfd_actor(ts([[p0, p1, 1., 0.]])).data[0])
 
-            # env.assess_strategies((Strategy(avg_atk_actor, atk_sn), Strategy(avg_dfd_actor, dfd_sn)))
-            env.assess_strategies((Strategy(atk_actor, atk_sn), Strategy(dfd_actor, dfd_sn)))
+            env.assess_strategies((Strategy(avg_atk_actor, atk_sn), Strategy(avg_dfd_actor, dfd_sn)))
+            # env.assess_strategies((Strategy(atk_actor, atk_sn), Strategy(dfd_actor, dfd_sn)))
