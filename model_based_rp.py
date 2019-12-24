@@ -202,7 +202,11 @@ def collect(n):
     atk_ob, dfd_ob = env.reset()
     atk_obs = []
     dfd_obs = []
-    for i in range(n):
+    for i in range(n + 1):
+        atk_ob[0] = i / n
+        atk_ob[1] = 1 - i / n
+        dfd_ob[0] = i / n
+        dfd_ob[1] = 1 - i / n
         atk_obs.append(atk_ob)
         dfd_obs.append(dfd_ob)
         atk_ob, dfd_ob = env.reset()
@@ -226,9 +230,9 @@ class Strategy(object):
         return s[a]
 
 
-for i in range(5000):
+for i in range(100000):
 
-    atk_obs, dfd_obs = collect(100)
+    atk_obs, dfd_obs = collect(10)
     priors, rs, atk_types = torch.split(ts(atk_obs), [n_types, n_rounds, n_types], dim=1)
 
     # cnt_c += 1
@@ -279,4 +283,5 @@ for i in range(5000):
             # print(avg_dfd_actor(ts([[p0, p1, 1.]])).data[0])
 
             env.assess_strategies((Strategy(avg_atk_actor), Strategy(avg_dfd_actor)))
+            # env.assess_strategies((Strategy(atk_actor), Strategy(dfd_actor)))
 
