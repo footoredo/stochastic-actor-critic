@@ -21,32 +21,33 @@ class SecurityGame(object):
                  random_prior=False):
         self.n_slots = n_slots
         self.n_types = n_types
-        self.prior = prior if prior is not None else np.random.rand(n_types)
+        self.prior = prior if prior is not None else self.rng.rand(n_types)
         self.prior /= np.sum(self.prior)
         self.n_rounds = n_rounds
         self.seed = seed
         self.random_prior = random_prior
         self.beta = beta
 
-        if seed is not None:
-            np.random.seed(int(seed))
+        self.rng = np.random.RandomState(seed=seed)
 
         value_range = value_high - value_low
-        self.atk_rew = np.random.rand(n_types, n_slots) * value_range + value_low
-        self.atk_pen = -np.random.rand(n_types, n_slots) * value_range - value_low
-        self.dfd_rew = np.random.rand(n_slots) * value_range + value_low
-        self.dfd_pen = -np.random.rand(n_slots) * value_range - value_low
+        atk_rew = self.rng.rand(n_types, n_slots) * value_range + value_low
+        atk_pen = -self.rng.rand(n_types, n_slots) * value_range - value_low
+        dfd_rew = self.rng.rand(n_slots) * value_range + value_low
+        dfd_pen = -self.rng.rand(n_slots) * value_range - value_low
 
         self.payoff = np.zeros((n_types, n_slots, n_slots, 2), dtype=np.float32)
         for t in range(n_types):
             for i in range(n_slots):
                 for j in range(n_slots):
                     if i == j:
-                        self.payoff[t, i, j, 0] = self.atk_pen[t, i]
-                        self.payoff[t, i, j, 1] = self.dfd_rew[j]
+                        self.payoff[t, i, j, 0] = atk_pen[t, i]
+                        # self.payoff[t, i, j, 1] = -atk_pen[t, i]
+                        self.payoff[t, i, j, 1] = dfd_rew[j]
                     else:
-                        self.payoff[t, i, j, 0] = self.atk_rew[t, i]
-                        self.payoff[t, i, j, 1] = self.dfd_pen[j]
+                        self.payoff[t, i, j, 0] = atk_rew[t, i]
+                        # self.payoff[t, i, j, 1] = -atk_rew[t, i]
+                        self.payoff[t, i, j, 1] = dfd_pen[j]
 
         self.ob_len = [n_types * 2 + n_rounds, n_types + n_rounds]
 
@@ -73,7 +74,7 @@ class SecurityGame(object):
         return [self._get_atk_ob(atk_type, belief, i_round), self._get_dfd_ob(belief, i_round)]
 
     def generate_belief(self):
-        x = [0.] + sorted(np.random.rand(self.n_types - 1).tolist()) + [1.]
+        x = [0.] + sorted(self.rng.rand(self.n_types - 1).tolist()) + [1.]
         for i in range(self.n_types):
             self.prior[i] = x[i + 1] - x[i]
 
@@ -82,7 +83,7 @@ class SecurityGame(object):
             self.generate_belief()
         self.belief = np.copy(self.prior)
         self.i_round = 0
-        self.atk_type = np.random.choice(range(self.n_types), p=self.prior)
+        self.atk_type = self.rng.choice(range(self.n_types), p=self.prior)
 
         return self._get_ob(self.atk_type, self.belief, self.i_round)
 
@@ -105,21 +106,19 @@ class SecurityGame(object):
     def _convert_attacker_strategy(self, attacker_strategy, defender_strategy):
         profile = [[] for _ in range(self.n_types)]
 
-        def convert(t, belief, history):
+        def convert(t, history):
             s = dict()
             if len(history) < self.n_rounds:
-                tmp = attacker_strategy.strategy(self._get_atk_ob(t, belief, len(history)))
+                tmp = attacker_strategy(t, history)
                 s[self.encode_history(history)] = tmp
                 profile[t].append((str(history), tmp[0]))
                 for a in range(self.n_slots):
-                    prob = [attacker_strategy.prob(self._get_atk_ob(xt, belief, len(history)), a)
-                            for xt in range(self.n_types)]
-                    s.update(convert(t, update_belief(belief, prob), history + [a]))
+                    s.update(convert(t, history + [a]))
             return s
 
         strategy = []
         for at in range(self.n_types):
-            strategy.append(convert(at, self.prior, []))
+            strategy.append(convert(at, []))
             profile[at] = sorted(profile[at], key=lambda x: (len(x[0]), x[0]))
             p = []
             for entry in profile[at]:
@@ -130,22 +129,19 @@ class SecurityGame(object):
     def _convert_defender_strategy(self, attacker_strategy, defender_strategy):
         profile = []
 
-        def convert(belief, history):
+        def convert(history):
             s = dict()
             if len(history) < self.n_rounds:
                 # print(belief, history)
-                tmp = defender_strategy.strategy(self._get_dfd_ob(belief, len(history)))
+                tmp = defender_strategy(history)
                 s[self.encode_history(history)] = tmp
                 profile.append((str(history), tmp[0]))
                 for a in range(self.n_slots):
-                    prob = [attacker_strategy.prob(self._get_atk_ob(xt, belief, len(history)), a)
-                            for xt in range(self.n_types)]
-                    # print(prob)
-                    s.update(convert(update_belief(belief, prob), history + [a]))
+                    s.update(convert(history + [a]))
             return s
 
         strategy = dict()
-        strategy.update(convert(self.prior, []))
+        strategy.update(convert([]))
 
         profile = sorted(profile, key=lambda x: (len(x[0]), x[0]))
         p = []
@@ -168,7 +164,7 @@ class SecurityGame(object):
                 atk_action = [attacker_strategy.act(self._get_atk_ob(t, prior, 0)) for t in range(self.n_types)]
                 dfd_action = defender_strategy.act(self._get_dfd_ob(prior, 0))
                 atk_value = [self.get_atk_payoff(t, atk_action[t], dfd_action) for t in range(self.n_types)]
-                atk_true_action = np.random.choice(atk_action, 1, p=prior)
+                atk_true_action = self.rng.choice(atk_action, 1, p=prior)
                 dfd_value = self.get_def_payoff(atk_true_action, dfd_action, None)
                 if self.atk_vn is not None and self.dfd_vn is not None:
                     for t in range(self.n_types):
