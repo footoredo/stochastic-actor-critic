@@ -30,7 +30,8 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, conn):
         for i in range(2):
             opp_strategy[i] = regret_to_strategy(opp_regret[i])
         pro_strategy = regret_to_strategy(pro_regret)
-        w = max(tt - n_iter // 10, 0)
+        w = max(tt - n_iter // 4, 0)
+        # w = 1
         if ws + w > 0:
             opp_av = (opp_av * ws + opp_strategy * w) / (ws + w)
             pro_av = (pro_av * ws + pro_strategy * w) / (ws + w)
@@ -151,7 +152,8 @@ def run(env, n_samples, n_iter):
                         # print("protagonist position: ({}, {})".format(pro_x, pro_y))
                         # print(regret_matching(env, np.array([p, 1 - p]), np.array([opp_x, opp_y]),
                         #                       np.array([pro_x, pro_y]), n_iter))
-                        jobs.append((np.array([p, 1 - p]), np.array([opp_x, opp_y]), np.array([pro_x, pro_y])))
+                        jobs.append((np.array([p, 1 - p]), np.array([opp_x + 0.5, opp_y + 0.5]),
+                                     np.array([pro_x + 0.5, pro_y + 0.5])))
 
     results = run_parallel(env, n_iter, jobs)
 
@@ -283,10 +285,10 @@ def main():
     np.set_printoptions(precision=3, suppress=True)
     env = TaggingGame(8)
     # run(env, 7, 200)
-    # interactive(env, 1000)
+    interactive(env, 1000)
     # plot(env, 0.1, 2000, 100)
     # plot2(env, 10, 1000)
-    train_net(env, 10000, 100)
+    # train_net(env, 10000, 100)
 
 
 if __name__ == "__main__":
