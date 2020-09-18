@@ -116,20 +116,33 @@ def run_parallel(env, n_iter, jobs):
     print("Total jobs:", len(jobs))
 
     runner = Runner(env, n_iter)
-    processes = []
-    conns = []
-    for job in jobs:
-        parent_conn, child_conn = Pipe()
-        process = Process(target=runner, args=job + (child_conn,))
-        processes.append(process)
-        conns.append(parent_conn)
+    # processes = []
+    # conns = []
+    # for job in jobs:
+    #     parent_conn, child_conn = Pipe()
+    #     process = Process(target=runner, args=job + (child_conn,))
+    #     processes.append(process)
+    #     conns.append(parent_conn)
 
-    chunks = np.array_split(range(len(jobs)), (len(jobs) + 11) // 12)
+    n_par = 12
+    chunks = np.array_split(range(len(jobs)), (len(jobs) + n_par - 1) // n_par)
     results = []
+    conns = []
+    for i in range(n_par):
+        conns.append(Pipe())
+
     for chunk in chunks:
         print("executing", chunk)
         st = time.time()
-        cur_results = execute_parallel(select(processes, chunk), select(conns, chunk))
+        chunk_jobs = select(jobs, chunk)
+        processes = []
+        chunk_conns = []
+        for i, job in enumerate(chunk_jobs):
+            parent_conn, child_conn = conns[i] 
+            process = Process(target=runner, args=job + (child_conn,))
+            processes.append(process)
+            chunk_conns.append(parent_conn)
+        cur_results = execute_parallel(processes, chunk_conns)
         results += cur_results
         print("Time:", time.time() - st)
 
@@ -215,19 +228,19 @@ def plot2(env, n_samples, n_iter):
 
 
 def train_net(env, n_samples, n_iter):
-    # jobs = []
-    # for _ in range(n_samples):
-    #     p = np.random.rand(1)
-    #     opp_pos = np.random.rand(2) * np.array([env.size, env.size])
-    #     pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
-    #     jobs.append((np.array([p, 1 - p]), opp_pos, pro_pos))
-    #
-    # results = run_parallel(env, n_iter, jobs)
-    #
-    # joblib.dump(jobs, "tmp-jobs.obj")
-    # joblib.dump(results, "tmp-results.obj")
-    jobs = joblib.load("tmp-jobs.obj")
-    results = joblib.load("tmp-results.obj")
+    jobs = []
+    for _ in range(n_samples):
+        p = np.random.rand(1)
+        opp_pos = np.random.rand(2) * np.array([env.size, env.size])
+        pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
+        jobs.append((np.array([p, 1 - p]), opp_pos, pro_pos))
+   
+    results = run_parallel(env, n_iter, jobs)
+   
+    joblib.dump(jobs, "tmp-jobs.obj")
+    joblib.dump(results, "tmp-results.obj")
+    # jobs = joblib.load("tmp-jobs.obj")
+    # results = joblib.load("tmp-results.obj")
 
     dim = 32
     model = nn.Sequential(
@@ -286,7 +299,7 @@ def main():
     # interactive(env, 1000)
     # plot(env, 0.1, 2000, 100)
     # plot2(env, 10, 1000)
-    train_net(env, 10000, 100)
+    train_net(env, 100000, 100)
 
 
 if __name__ == "__main__":
