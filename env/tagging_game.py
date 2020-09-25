@@ -6,7 +6,7 @@ def calc_dis(x, y):
 
 
 class TaggingGame(object):
-    def __init__(self, size=8):
+    def __init__(self, size=8, next_v=None):
         self.size = size
         self.tag_lim = 1.5 if size == 4 else 2.5
         self.ally_base = np.array([0.5, size - 0.5])
@@ -52,4 +52,4 @@ class TaggingGame(object):
         opp_reward -= 0.25 * np.power(calc_dis(new_opp_pos, self.ally_base if opp_type == 0 else self.enemy_base), 0.4)
         pro_reward -= 0.25 * np.power(calc_dis(new_pro_pos, new_opp_pos), 0.4)
 
-        return opp_pos, pro_pos, opp_reward, pro_reward
+        return new_opp_pos, new_pro_pos, opp_reward, pro_reward

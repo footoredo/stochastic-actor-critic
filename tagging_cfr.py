@@ -6,6 +6,10 @@ import joblib
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+from modules.tagging_cfr_reader import ApproximatedReader
+from functools import partial
+import seaborn as sns
+import pandas as pd
 
 
 def regret_to_strategy(regret):
@@ -18,7 +22,34 @@ def regret_to_strategy(regret):
     return strategy
 
 
-def regret_matching(env, belief, opp_pos, pro_pos, n_iter, conn):
+def bayes(belief, atk_s, a):
+    belief = belief * atk_s[:, a]
+    if belief.sum() < 1e-5:
+        ret = np.ones_like(belief) / belief.shape[0]
+    else:
+        ret = belief / belief.sum()
+
+    return ret
+
+
+def calc_rew(env, reader, belief, tp, opp_pos, pro_pos, a, b):
+    new_opp_pos, new_pro_pos, opp_reward, pro_reward = env.step(tp, opp_pos, pro_pos, a, b)
+    if reader is not None:
+        if any(np.isnan(belief)):
+            belief = np.ones_like(belief) / belief.shape[0]
+        _, _, opp_v, pro_v, _, _ = reader.access(belief, new_opp_pos, new_pro_pos)
+        opp_reward += opp_v[tp]
+        pro_reward += pro_v
+
+    return opp_reward, pro_reward
+
+
+def regret_matching(env, belief, opp_pos, pro_pos, n_iter, reader, conn):
+    # if next_v is not None:
+    #     reader = ApproximatedReader(next_v)
+    # else:
+    #     reader = None
+    _calc_rew = partial(calc_rew, env, reader)
     opp_regret = np.zeros((2, 4))
     pro_regret = np.zeros(5)
     opp_av = np.zeros((2, 4))
@@ -42,7 +73,8 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, conn):
         for i in range(2):
             for a in range(4):
                 for b in range(5):
-                    _, _, opp_r, _ = env.step(i, opp_pos, pro_pos, a, b)
+                    nb = bayes(belief, opp_strategy, a)
+                    opp_r, _ = _calc_rew(nb, i, opp_pos, pro_pos, a, b)
                     opp_cfv[i][a] += opp_r * pro_strategy[b]
                     opp_v[i] += opp_r * opp_strategy[i, a] * pro_strategy[b]
 
@@ -58,7 +90,8 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, conn):
         for b in range(5):
             for i in range(2):
                 for a in range(4):
-                    _, _, _, pro_r = env.step(i, opp_pos, pro_pos, a, b)
+                    nb = bayes(belief, opp_strategy, a)
+                    _, pro_r = _calc_rew(nb, i, opp_pos, pro_pos, a, b)
                     pro_cfv[b] += pro_r * belief[i] * opp_strategy[i, a]
                     pro_v += pro_r * belief[i] * opp_strategy[i, a] * pro_strategy[b]
 
@@ -73,7 +106,10 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, conn):
     for i in range(2):
         for a in range(4):
             for b in range(5):
-                _, _, opp_r, pro_r = env.step(i, opp_pos, pro_pos, a, b)
+                nb = bayes(belief, opp_av, a)
+                if b == 0:
+                    print(i, a, nb)
+                opp_r, pro_r = _calc_rew(nb, i, opp_pos, pro_pos, a, b)
                 # print(i, a, b, opp_r, pro_r)
                 opp_v[i] += opp_r * opp_av[i][a] * pro_av[b]
                 opp_cfv[i, a] += opp_r * pro_av[b]
@@ -83,16 +119,17 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, conn):
     if conn is not None:
         conn.send((opp_av, pro_av, opp_v, pro_v, opp_cfv, pro_cfv))
 
-    return opp_av, pro_av, opp_v, pro_v
+    return opp_av, pro_av, opp_v, pro_v, opp_cfv, pro_cfv
 
 
 class Runner(object):
-    def __init__(self, env, n_iter):
+    def __init__(self, env, n_iter, reader):
         self.env = env
         self.n_iter = n_iter
+        self.reader = reader
 
     def __call__(self, belief, opp_pos, pro_pos, conn):
-        return regret_matching(self.env, belief, opp_pos, pro_pos, self.n_iter, conn)
+        return regret_matching(self.env, belief, opp_pos, pro_pos, self.n_iter, self.reader, conn)
 
 
 def execute_parallel(processes, conns):
@@ -113,10 +150,10 @@ def select(objects, indices):
     return [objects[i] for i in indices]
 
 
-def run_parallel(env, n_iter, jobs):
+def run_parallel(env, n_iter, reader, jobs):
     print("Total jobs:", len(jobs))
 
-    runner = Runner(env, n_iter)
+    runner = Runner(env, n_iter, reader)
     # processes = []
     # conns = []
     # for job in jobs:
@@ -173,12 +210,15 @@ def run(env, n_samples, n_iter):
     joblib.dump(results, "tagging-{}_cfr.obj".format(env.size))
 
 
-def interactive(env, n_iter):
+def interactive(env, n_iter, reader):
     while True:
-        inputs = input().split()
-        b = float(inputs[0])
-        ox, oy, px, py = map(float, inputs[1:])
-        print(regret_matching(env, np.array([b, 1 - b]), np.array([ox, oy]), np.array([px, py]), n_iter, None))
+        try:
+            inputs = input().split()
+            b = float(inputs[0])
+            ox, oy, px, py = map(float, inputs[1:])
+            print(regret_matching(env, np.array([b, 1 - b]), np.array([ox, oy]), np.array([px, py]), n_iter, reader, None))
+        except ValueError:
+            print("value error!")
 
 
 def plot(env, p, n_samples, n_iter):
@@ -195,7 +235,7 @@ def plot(env, p, n_samples, n_iter):
         xs.append(pro_pos[0])
         ys.append(pro_pos[1])
 
-    results = run_parallel(env, n_iter, jobs)
+    results = run_parallel(env, n_iter, None, jobs)
     for _, _, _, v, _, _ in results:
         vs.append(v)
 
@@ -209,9 +249,12 @@ def plot(env, p, n_samples, n_iter):
 def plot2(env, n_samples, n_iter):
     xs = []
     vs = []
+    ns = []
     jobs = []
-    opp_pos = np.random.rand(2) * np.array([env.size, env.size])
-    pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
+    # opp_pos = np.random.rand(2) * np.array([env.size, env.size])
+    # pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
+    opp_pos = np.array([4.0, 4.5])
+    pro_pos = np.array([4.0, 4.0])
     print("opp_pos:", opp_pos)
     print("pro_pos:", pro_pos)
     for i in range(n_samples):
@@ -220,12 +263,38 @@ def plot2(env, n_samples, n_iter):
         # print(pro_pos)
         jobs.append((np.array([p, 1 - p]), opp_pos, pro_pos))
         xs.append(p)
+        ns.append("atk-0")
+        # xs.append(p)
+        # ns.append("atk-1")
+        # xs.append(p)
+        # ns.append("dfd")
 
-    results = run_parallel(env, n_iter, jobs)
+    results = run_parallel(env, n_iter, None, jobs)
     for _, _, atk_v, dfd_v, _, _ in results:
         vs.append(atk_v[0])
+        # vs.append(atk_v[1])
+        # vs.append(dfd_v)
 
-    plt.scatter(x=xs, y=vs)
+    def approximate(xx):
+        sv = 0.
+        sw = 0.
+        for i, x in enumerate(xs):
+            w = 1. / (1e-2 + np.square(x - xx))
+            sv += w * results[i][2][0]
+            sw += w
+        return sv / sw
+
+    ax = np.arange(0., 1., 0.01)
+    ay = list(map(approximate, ax))
+
+    # df2 = pd.DataFrame(dict(belief=ax, value=ay))
+
+    df = pd.DataFrame(dict(belief=xs, value=vs, name=ns))
+
+    # fig, axs = plt.subplots(ncols=2)
+    sns.scatterplot(x="belief", y="value", hue="name", data=df)
+    # sns.lineplot(x="belief", y="value", data=df2, ax=axs[1])
+    plt.plot(ax, ay, color='r')
     plt.show()
 
 
@@ -297,10 +366,12 @@ def train_net(env, n_samples, n_iter):
 def main():
     np.set_printoptions(precision=3, suppress=True)
     env = TaggingGame(8)
+    # reader = ApproximatedReader("tagging-8_cfr")
+    reader = None
     # run(env, 7, 200)
-    interactive(env, 1000)
+    interactive(env, 1000, reader)
     # plot(env, 0.1, 2000, 100)
-    # plot2(env, 10, 1000)
+    # plot2(env, 11, 100)
     # train_net(env, 10000, 100)
 
 

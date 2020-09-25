@@ -137,6 +137,46 @@ class Interp1dPackFast(nn.Module):
         return wb / w * ts(self.ys[i]) + wa / w * ts(self.ys[i + 1])
 
 
+class NNPack(nn.Module):
+    def __init__(self, samples):
+        super(NNPack, self).__init__()
+        self.n = n = len(samples)
+        xs = []
+        ys = []
+        for i in range(n):
+            xs.append(samples[i][0])
+            y = samples[i][1:]
+            if y.shape[0] == 1:
+                y = y[0]
+            ys.append(y)
+
+        self.xs = np.array(xs, dtype=np.float)
+        self.ys = np.array(ys, dtype=np.float)
+        self.dis = 1. / (n - 1)
+        # print(xs, ys)
+        # print(self.cs(0.8))
+
+    def forward(self, b, eps=ts(1e-5)):
+        x = b[0]
+        sv = 0.
+        sw = 0.
+        for i in range(self.n):
+            dis = torch.abs(x - self.xs[i]) - 0.1
+            if dis <= 0:
+                w = 1. / eps * (1. - dis / (eps / 1e-2))
+            else:
+                w = 1. / (eps + dis * dis)
+
+            # dis = dis.clamp(min=eps)
+            # dis = torch.abs(x - self.xs[i])
+            # w = 1. / (eps + dis * dis)
+            # w = torch.exp(-(0.2 / eps) * dis * dis)
+            # w = max(0., 2 - np.exp(dis))
+            sw += w
+            sv += w * ts(self.ys[i])
+        return sv / sw
+
+
 class Interp1dPackUltraFast(object):
     def __init__(self, samples):
         self.n = n = len(samples)

@@ -30,49 +30,8 @@ def parse_args():
     parser.add_argument('--sep', action="store_true", default=False)
     parser.add_argument('--cfr', action="store_true", default=False)
     parser.add_argument('--pred', action="store_true", default=False)
+    parser.add_argument('--two-nets', action="store_true", default=False)
     return parser.parse_args()
-
-
-sss = """-0.5289521415	1.92078265	1.47132343
--0.6000796998	1.927774621	1.470627338
--0.6910867266	1.955017832	1.471201841
--0.8163690535	2.018780501	1.477761271
--1.281290202	2.255433542	1.477046199
--1.345538948	2.295303546	1.471998621
--1.360456279	2.326823054	1.482942076
--1.424982532	2.444170809	1.473495646
--1.556015033	2.948649852	1.477981844
--1.60378908	3.10208818	1.491053313
--1.619093747	3.295927726	1.513530379"""
-
-
-# sss = """-0.3938881987	1.921428326	1.921428326	1.471743537
-# -0.3938881987	1.921428326	1.689896673	1.471743537
-# -0.3938881987	1.921428326	1.458365021	1.471743537
-# -1.330031419	2.331433031	1.232993696	1.471743537
-# -1.330031419	2.331433031	0.8668472511	1.471743537
-# -1.330031419	2.331433031	0.5007008062	1.471743537
-# -1.34582891	2.351454858	0.1330845976	1.471743537
-# -1.34582891	2.351454858	-0.2366437792	1.471743537
-# -1.619176196	3.474365121	-0.6004679326	1.471743537
-# -1.619176196	3.474365121	-1.109822064	1.471743537
-# -1.619176196	3.474365121	-1.619176196	1.471743537"""
-
-# sss = np.array(list(map(float, sss.split()))).reshape((11, 3))
-# # atk_vn = []
-# samples = []
-# for p in range(11):
-#     s = p / 10. * sss[p, 0] + (10 - p) / 10. * sss[p, 1]
-#     samples.append((np.array([p / 10, (10 - p) / 10]), np.array([s])))
-#     # print(s)
-#     # atk_vn.append(Pack(samples))
-# atk_vn = CubicSplinePack(samples)
-# # print(atk_vn(ts([0.5])))
-#
-# samples = []
-# for p in range(11):
-#     samples.append((np.array([p / 10, (10 - p) / 10]), sss[p, 2].reshape(1)))
-# dfd_vn = CubicSplinePack(samples)
 
 
 def calc_exp(n_types, n_actions, payoff, prior, atk_s, dfd_s):
@@ -114,7 +73,7 @@ class Value(nn.Module):
         self.is_atk = is_atk
         self.ratio = ratio
 
-    def forward(self, prior, atk_s, dfd_s):
+    def forward(self, prior, atk_s, dfd_s, eps=1e-5):
         prior = torch.tensor(prior, dtype=torch.float)
         a = torch.bmm(atk_s.unsqueeze(1), torch.tensor(self.payoff, dtype=torch.float))  # [t, 1, s]
         a = torch.matmul(a.squeeze(), dfd_s.unsqueeze(1))  # [t, 1]
@@ -124,6 +83,7 @@ class Value(nn.Module):
         else:
             v = torch.matmul(prior, a.squeeze())
 
+        # return v
         if self.vn is not None:
             for a in range(self.n_actions):
                 if self.is_atk:
@@ -135,7 +95,38 @@ class Value(nn.Module):
                 # print(prob, new_b.sum())
                 # new_b = prior.unsqueeze(0)
                 # v += prob * detach_ts(self.vn(new_b)) * self.ratio
-                v += prob * self.vn(new_b) * self.ratio
+
+                p = new_b[0].detach().item()
+                aa = 0.5
+                # bb = (5.0 - aa)
+                bb = 10.0 - aa
+                if self.is_atk:
+                    tv = [0.0, 0.0]
+                    if p < 0.5 - 1e-6:
+                        # tv = [5.0, -5.0]
+                        tv = [bb * (0.5 - p) + aa, -bb * (0.5 - p) - aa]
+                    if p > 0.5 + 1e-6:
+                        tv = [-bb * (p - 0.5) - aa, bb * (p - 0.5) + aa]
+                else:
+                    tv = aa
+
+                if type(self.vn) == tuple or type(self.vn) == list:
+                    # if self.is_atk:
+                    #     print(a, prob.detach().numpy(), new_b.detach().numpy(), self.vn[0](new_b).detach().numpy(), self.vn[1](new_b).detach().numpy())
+                    #     # print((prob * self.vn(new_b).detach()).detach().numpy())
+                    # v += self.ratio * (prob.detach() * self.vn[0](new_b) + prob * self.vn[1](new_b).detach())
+
+                    # print(prob.size(), ts(tv).size())
+                    # xx = new_b[0] - 0.5
+                    # v += self.ratio * (prob.detach() * xx * xx * 5 + prob * ts(tv))
+                    v += self.ratio * (prob.detach() * self.vn[0](new_b) + prob * ts(tv))
+                    # v += self.ratio * (prob.detach() * self.vn[0](new_b))
+                else:
+                    # if self.is_atk:
+                    #     print(a, prob.detach().numpy(), new_b.detach().numpy(), self.vn(new_b).detach().numpy())
+                    #     print((prob * self.vn(new_b).detach()).detach().numpy())
+                    v += prob * self.vn(new_b, eps) * self.ratio
+                    # v += prob * ts(tv) * self.ratio
 
         return v
 
@@ -186,6 +177,8 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
         if ss < 1e-6:
             if np.min(regret) > -1e-6:
                 return np.ones_like(regret) / regret.shape[-1]
+                # x = np.random.rand(regret.shape[0])
+                # return x / x.sum()
             else:
                 x = np.argmax(regret)
                 s = np.zeros_like(s)
@@ -239,7 +232,7 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
         for t in range(n_types):
             for a in range(n_slots):
                 r = atk_u[t, a] - atk_au[t]
-                r += np.random.normal(0., 5.)
+                # r += np.random.normal(0., 5.)
                 # atk_regret[t, a] += r
                 # print(t, a, r)
                 atk_regret[t, a] = (atk_regret[t, a] * ws + r * w) / (ws + w)
@@ -254,7 +247,7 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
 
         for b in range(n_slots):
             r = dfd_u[b] - dfd_au
-            r += np.random.normal(0., 5.)
+            # r += np.random.normal(0., 5.)
             # dfd_regret[b] += r
             dfd_regret[b] = (dfd_regret[b] * ws + r * w) / (ws + w)
 
@@ -287,9 +280,9 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
 
     if plot:
         fig, ax = plt.subplots()
-        # df = pd.DataFrame(dict(it=list(range(n_iter)) * 3,
-        #                        u=list(np.array(atk_css)[:, 0, 0]) + list(np.array(atk_css)[:, 1, 0]) + list(np.array(dfd_css)[:, 0]),
-        #                        name=["a0"] * n_iter + ["a1"] * n_iter + ["d"] * n_iter))
+        df = pd.DataFrame(dict(it=list(range(n_iter)) * 3,
+                               u=list(np.array(atk_ass)[:, 0, 0]) + list(np.array(atk_ass)[:, 1, 0]) + list(np.array(dfd_ass)[:, 0]),
+                               name=["a0"] * n_iter + ["a1"] * n_iter + ["d"] * n_iter))
 
         # df = pd.DataFrame(dict(it=list(range(n_iter)),
         #                        u=list(0.7712594074 - np.array(atk_css)[:, 1, 0]),
@@ -297,12 +290,12 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
         # df = pd.DataFrame(dict(it=list(range(n_iter)) * 3,
         #                        u=list(np.array(atk_es)[:, 0]) + list(np.array(atk_es)[:, 1]) + dfd_es,
         #                        name=["a0"] * n_iter + ["a1"] * n_iter + ["d"] * n_iter))
-        print(atk_es[-1], dfd_es[-1])
-        df = pd.DataFrame(dict(it=list(range(n_iter)),
-                               u=np.sum(atk_es, -1) + dfd_es,
-                               name=["sum"] * n_iter))
-        ax.set(xscale="log")
-        ax.set(yscale="log", ylim=[0.0001, 100])
+        # print(atk_es[-1], dfd_es[-1])
+        # df = pd.DataFrame(dict(it=list(range(n_iter)),
+        #                        u=np.abs(np.array(atk_ass)[:, 0, 0] - np.array(atk_ass[:, 1, 0])),
+        #                        name=["diff"] * n_iter))
+        # ax.set(xscale="log")
+        # ax.set(yscale="log", ylim=[0.0001, 100])
         sns.lineplot(x="it", y="u", data=df, ax=ax, hue="name")
         plt.show()
 
@@ -320,10 +313,10 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
     # if solve:
     #     return np.ones((n_types, n_slots)) / n_slots, np.ones(n_slots) / n_slots
     _calc_exp = partial(calc_exp, n_types=n_types, n_actions=n_slots, payoff=payoff, prior=prior)
-    # atk_s = Strategy(n_slots, n_types, init=np.random.normal(0., 1, (n_types, n_slots)))
-    # dfd_s = Strategy(n_slots, init=np.random.normal(0., 1, n_slots))
-    atk_s = Strategy(n_slots, n_types)
-    dfd_s = Strategy(n_slots)
+    atk_s = Strategy(n_slots, n_types, init=np.random.normal(0., .1, (n_types, n_slots)))
+    dfd_s = Strategy(n_slots, init=np.random.normal(0., .1, n_slots))
+    # atk_s = Strategy(n_slots, n_types)
+    # dfd_s = Strategy(n_slots)
     # atk_s = Strategy(n_slots, n_types, init=[[-10, 10], [-0.07740894942, -2.597107694]])
     # dfd_s = Strategy(n_slots, init=[-0.6474352071, -0.7410492519])
     atk_v = Value(n_slots, n_types, payoff[:, :, :, 0], atk_vn, True, ratio)
@@ -348,10 +341,14 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
     # print(atk_v(prior, atk_s(), dfd_s()))
     # start_t = n_iter / 4
     start_t = 0
+    eps_k = np.log(1000.) / n_iter
+    start_eps = 1e-2
     for t in range(n_iter):
         # print(atk_s())
         # print(dfd_s())
-        av = atk_v(prior, atk_s(), dfd_s())
+        eps = start_eps / np.exp(eps_k * t)
+        # eps = start_eps
+        av = atk_v(prior, atk_s(), dfd_s(), ts(eps))
         # av = atk_v(np.ones(n_types) / n_types, atk_s(), dfd_s())
         # print(av, dv)
 
@@ -368,8 +365,12 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
         (av * ts(prior)).sum().backward()
         # print(atk_s.logits)
         # print(atk_s.logits.grad)
-        atk_grad = atk_s.logits.grad.detach().numpy()
-        atk_s.logits.data += aalr * atk_s.logits.grad
+        atk_grad = atk_s.logits.grad.detach().numpy().copy()
+        # if (t + 1) % 100 == 0:
+        #     print(atk_grad)
+        with torch.no_grad():
+            atk_s.logits += aalr * atk_s.logits.grad
+            atk_s.logits.grad.zero_()
 
         w = 1 if t >= start_t else 0
         if ws + w > 0:
@@ -381,8 +382,10 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
         dfd_s.zero_grad()
         dv.backward()
         # print(dfd_s.logits.grad)
-        dfd_grad = atk_s.logits.grad.detach().numpy()
-        dfd_s.logits.data += adlr * dfd_s.logits.grad
+        dfd_grad = dfd_s.logits.grad.detach().numpy().copy()
+        with torch.no_grad():
+            dfd_s.logits += adlr * dfd_s.logits.grad
+            dfd_s.logits.grad.zero_()
 
         if ws + w > 0:
             dfd_a = (dfd_a * ws + dfd_s().detach().numpy() * w) / (ws + w)
@@ -402,15 +405,19 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
             aexs[i].append(aex[i])
         dexs.append(dex)
 
-        # if (t + 1) % 100 == 0:
-        #     print("#", t)
-        #     print("atk_grad_norm:", np.linalg.norm(atk_grad))
-        #     print("dfd_grad_norm:", np.linalg.norm(dfd_grad))
+        if (t + 1) % 100 == 0:
+            print("#", t)
+            # print("atk_grad_norm:", np.linalg.norm(atk_grad))
+            # print("dfd_grad_norm:", np.linalg.norm(dfd_grad))
+            print("atk_grad:", atk_grad)
+            print("dfd_grad:", dfd_grad)
+            print("atk_logits:", atk_s.logits.data)
+            print("dfd_logits:", dfd_s.logits.data)
         #     print(atk_a)
         #     print(dfd_a)
         #
-        #     print(atk_v(prior, ts(atk_a), ts(dfd_a)))
-        #     print(dfd_v(prior, ts(atk_a), ts(dfd_a)))
+            print(atk_v(prior, atk_s(), dfd_s()))
+            # print(dfd_v(prior, ts(atk_a), ts(dfd_a)))
 
     # print(time.time() - st)
     #
@@ -432,6 +439,11 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
         #                        value=value,
         #                        name=name))
 
+        # np.array(aas).dump("two-nets.data")
+        # np.array(aas).dump("one-net.data")
+        # df = pd.DataFrame(dict(iteration=list(range(n_iter)),
+        #                        value=np.abs(np.array(aas)[:, 0, 0] - np.array(aas)[:, 1, 0]),
+        #                        name=["diff"] * n_iter))
         df = pd.DataFrame(dict(iteration=list(np.arange(n_iter)) + list(np.arange(n_iter)) + list(np.arange(n_iter)),
                                value=list(np.array(acs)[:, 0, 0]) + list(np.array(acs)[:, 1, 0]) + list(
                                    np.array(dcs)[:, 0]),
@@ -445,8 +457,8 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
         #                        name=["a0"] * n_iter))
         fig, ax = plt.subplots()
         # ax.set(xscale="log")
-        # ax.set(yscale="log", ylim=[0.0001, 100])
-        # ax.set(ylim=[0.34, 0.36])
+        # ax.set(yscale="log", ylim=[0.0000001, 100])
+        # ax.set(ylim=[0.0, 1.0])
         sns.lineplot(x="iteration", y="value", data=df, ax=ax, hue="name")
         plt.show()
 
@@ -586,7 +598,7 @@ class RunnerWithTest(object):
         # lr, a0, a1, d = test_lr(self.test_runner, p, np.arange(0.05, 1.0, 0.05))
         if True:
             # lr = 0.07378945279999996
-            lr = 0.05
+            lr = 0.01
         else:
             ret = test_lr(self.test_runner, p, [0.005 * (1.4 ** i) for i in range(15)])
             # ret = test_lr(self.test_runner, p, np.arange(0.4, 0.5, 0.01))
@@ -703,6 +715,11 @@ def build_strategy(args, n_slots, n_types, n_rounds, ps, payoff, n_iter, atk_vns
 def main():
     args = parse_args()
 
+    if args.seed is None:
+        import random
+        args.seed = random.randint(1, 10000)
+        print("seed:", args.seed)
+
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
@@ -716,7 +733,8 @@ def main():
 
     if args.n_rounds > 1 and not args.build:
         atk_vn, dfd_vn = load_vn("data/" + get_filename(args, n_rounds=args.n_rounds - 1,
-                                                        n_iter=args.load_n_iter) + ".obj")
+                                                        n_iter=args.load_n_iter) + ".obj",
+                                 ["nn", "linear_fast"] if args.two_nets else "nn")
         # exit(0)
     else:
         atk_vn = None
@@ -740,7 +758,8 @@ def main():
         atk_vns = []
         dfd_vns = []
         for i in range(args.n_rounds - 1):
-            atk_vn, dfd_vn = load_vn("data/" + get_filename(args, n_rounds=i + 1, n_iter=args.load_n_iter) + ".obj")
+            atk_vn, dfd_vn = load_vn("data/" + get_filename(args, n_rounds=i + 1, n_iter=args.load_n_iter) + ".obj",
+                                     ["linear_fast", "linear_fast"] if args.two_nets else "nn")
             atk_vns.append(atk_vn)
             dfd_vns.append(dfd_vn)
         s_fns, avs, dvs, atk_tss, dfd_tss, lrs = build_strategy(args=args, n_slots=args.n_slots, n_types=args.n_types,

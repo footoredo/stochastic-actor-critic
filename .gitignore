@@ -1,3 +1,4 @@
 *.obj
 *.png
 __pycache__
+*.txt

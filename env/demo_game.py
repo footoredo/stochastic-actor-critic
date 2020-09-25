@@ -7,7 +7,9 @@ class DemoGame(object):
             atk_payoff = np.array([[[-2, 2], [-2, 2]], [[2, -2], [2, -2]]])
             dfd_payoff = -atk_payoff
         else:
-            atk_payoff = np.array([[[1, 1], [0, 0]], [[0, 0], [1, 1]]])
+            # atk_payoff = np.array([[[1, 1], [0, 0]], [[0, 0], [1, 1]]])
+            atk_payoff = np.array([[[0, 0], [0, 0]], [[0, 0], [0, 0]]])
+            # atk_payoff = np.array([[[2, -1], [-2, 1]], [[1, -2], [-1, 2]]])
             # dfd_payoff = np.array([[[0, 0], [0, 0]], [[0, 0], [0, 0]]])
             dfd_payoff = -atk_payoff
 
