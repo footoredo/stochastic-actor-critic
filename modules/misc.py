@@ -11,7 +11,7 @@ class Strategy(nn.Module):
         self.n_actions = n_actions
         self.n_types = n_types
         shape = (n_types, n_actions) if n_types > 1 else n_actions
-        print("init:", init)
+        # print("init:", init)
         data = init if init is not None else np.zeros(shape)
         self.logits = nn.Parameter(torch.tensor(data, dtype=torch.float), requires_grad=True)
 

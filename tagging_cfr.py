@@ -6,10 +6,12 @@ import joblib
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from modules.tagging_cfr_reader import ApproximatedReader
 from functools import partial
 import seaborn as sns
 import pandas as pd
+from utils.utils import ts, dt
 
 
 def regret_to_strategy(regret):
@@ -24,7 +26,7 @@ def regret_to_strategy(regret):
 
 def bayes(belief, atk_s, a):
     belief = belief * atk_s[:, a]
-    if belief.sum() < 1e-5:
+    if belief.sum() < 1e-3:
         ret = np.ones_like(belief) / belief.shape[0]
     else:
         ret = belief / belief.sum()
@@ -37,9 +39,24 @@ def calc_rew(env, reader, belief, tp, opp_pos, pro_pos, a, b):
     if reader is not None:
         if any(np.isnan(belief)):
             belief = np.ones_like(belief) / belief.shape[0]
-        _, _, opp_v, pro_v, _, _ = reader.access(belief, new_opp_pos, new_pro_pos)
-        opp_reward += opp_v[tp]
-        pro_reward += pro_v
+        if b == 5:
+            return -10000, -10000
+            for r in range(2):
+                if r == 0:
+                    belief[tp] *= 0.8
+                    belief[1 - tp] *= 0.2
+                else:
+                    belief[tp] *= 0.2
+                    belief[1 - tp] *= 0.8
+                belief /= belief.sum()
+                _, _, opp_v, pro_v, _, _ = reader.access(belief, new_opp_pos, new_pro_pos)
+                p = 0.8 if r == 0 else 0.2
+                opp_reward += opp_v[tp] * p
+                pro_reward += pro_v * p
+        else:
+            _, _, opp_v, pro_v, _, _ = reader.access(belief, new_opp_pos, new_pro_pos)
+            opp_reward += opp_v[tp]
+            pro_reward += pro_v
 
     return opp_reward, pro_reward
 
@@ -51,9 +68,9 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, reader, conn):
     #     reader = None
     _calc_rew = partial(calc_rew, env, reader)
     opp_regret = np.zeros((2, 4))
-    pro_regret = np.zeros(5)
+    pro_regret = np.zeros(6)
     opp_av = np.zeros((2, 4))
-    pro_av = np.zeros(5)
+    pro_av = np.zeros(6)
 
     ws = 0
     for tt in range(n_iter):
@@ -72,7 +89,7 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, reader, conn):
         opp_v = np.zeros(2)
         for i in range(2):
             for a in range(4):
-                for b in range(5):
+                for b in range(6):
                     nb = bayes(belief, opp_strategy, a)
                     opp_r, _ = _calc_rew(nb, i, opp_pos, pro_pos, a, b)
                     opp_cfv[i][a] += opp_r * pro_strategy[b]
@@ -85,9 +102,9 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, reader, conn):
         for i in range(2):
             opp_strategy[i] = regret_to_strategy(opp_regret[i])
 
-        pro_cfv = np.zeros(5)
+        pro_cfv = np.zeros(6)
         pro_v = 0.
-        for b in range(5):
+        for b in range(6):
             for i in range(2):
                 for a in range(4):
                     nb = bayes(belief, opp_strategy, a)
@@ -95,17 +112,17 @@ def regret_matching(env, belief, opp_pos, pro_pos, n_iter, reader, conn):
                     pro_cfv[b] += pro_r * belief[i] * opp_strategy[i, a]
                     pro_v += pro_r * belief[i] * opp_strategy[i, a] * pro_strategy[b]
 
-        for b in range(5):
+        for b in range(6):
             pro_regret[b] += pro_cfv[b] - pro_v
 
     opp_v = np.zeros(2)
     opp_cfv = np.zeros((2, 4))
     pro_v = 0.
-    pro_cfv = np.zeros(5)
+    pro_cfv = np.zeros(6)
 
     for i in range(2):
         for a in range(4):
-            for b in range(5):
+            for b in range(6):
                 nb = bayes(belief, opp_av, a)
                 if b == 0:
                     print(i, a, nb)
@@ -187,7 +204,7 @@ def run_parallel(env, n_iter, reader, jobs):
     return results
 
 
-def run(env, n_samples, n_iter):
+def run(env, n_samples, n_iter, reader=None):
     n = env.size
     ps = np.array(range(n_samples)) / (n_samples - 1)
 
@@ -205,9 +222,9 @@ def run(env, n_samples, n_iter):
                         jobs.append((np.array([p, 1 - p]), np.array([opp_x + 0.5, opp_y + 0.5]),
                                      np.array([pro_x + 0.5, pro_y + 0.5])))
 
-    results = run_parallel(env, n_iter, jobs)
+    results = run_parallel(env, n_iter, reader, jobs)
 
-    joblib.dump(results, "tagging-{}_cfr.obj".format(env.size))
+    joblib.dump(results, "tagging-{}_cfr_2.obj".format(env.size))
 
 
 def interactive(env, n_iter, reader):
@@ -363,16 +380,595 @@ def train_net(env, n_samples, n_iter):
         print("Predicted:", model(x)[0])
 
 
+class ValueNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(ValueNet, self).__init__()
+
+        self.linear1 = nn.Linear(input_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, _input):
+        h = self.linear1(_input)
+        x = self.linear2(F.tanh(h))
+        return x
+
+    def reinitialize(self):
+        self.linear1.reset_parameters()
+        self.linear2.reset_parameters()
+
+    def zero_(self):
+        with torch.no_grad():
+            self.linear1.weight.zero_()
+            self.linear1.bias.zero_()
+            self.linear2.weight.zero_()
+            self.linear2.bias.zero_()
+
+
+def act_on_adv(adv):
+    # print(adv)
+    if np.sum(np.abs(adv)) < 1e-5:
+        return np.random.choice(range(adv.shape[0]))
+    if np.max(adv) <= 0.:
+        return np.argmax(adv)
+    else:
+        s = np.maximum(adv, 0.)
+        return np.random.choice(range(s.shape[0]), p=s / s.sum())
+
+
+def train_v_net(n_batches, batch_size, lr, v_net: ValueNet, data: pd.DataFrame, verbose=False, reinit=True, n_passes=3,
+                device=None):
+    if reinit:
+        v_net.reinitialize()
+    loss_fn = nn.MSELoss()
+    v_optimizer = torch.optim.Adam(v_net.parameters(), lr=lr)
+
+    test_data = data[n_batches * batch_size:]
+    test_input = ts(np.stack(test_data["input"].to_list(), axis=0)).to(device)
+    test_output = ts(test_data["reward"].to_numpy()).to(device)
+
+    for T in range(n_passes):
+        print("    pass #{}".format(T))
+        for i in range(n_batches):
+            _input = np.stack(data["input"][i * batch_size: (i + 1) * batch_size].to_list(), axis=0)
+            _output = data["reward"][i * batch_size: (i + 1) * batch_size].to_numpy(dtype=np.float)
+            __input = ts(_input).to(device)
+            _pred = v_net(__input)
+
+            v_loss = loss_fn(_pred.squeeze().to(device), ts(_output).to(device))
+
+            if verbose:
+                if (i + 1) % 20 == 0:
+                    test_pred = v_net(test_input)
+                    print(loss_fn(test_pred.squeeze(), test_output).item())
+
+            v_optimizer.zero_grad()
+            v_loss.backward()
+            v_optimizer.step()
+
+
+def gen_adv_data(v_data: pd.DataFrame, v_net: ValueNet):
+    v_pred = dt(v_net(ts(v_data["input"])))
+    adv_data = pd.DataFrame(v_data)
+    for i in range(adv_data.shape[0]):
+        delta = v_pred[i, 0]
+        adv_data.at[i, "reward"] -= delta
+    return adv_data
+
+
+def train_adv_net(n_batches, batch_size, lr, adv_net: ValueNet, data: pd.DataFrame, verbose=False, reinit=True,
+                  n_passes=3, device=None):
+    if reinit:
+        adv_net.reinitialize()
+    loss_fn = nn.MSELoss()
+    adv_optimizer = torch.optim.Adam(adv_net.parameters(), lr=lr)
+
+    test_data = data[n_batches * batch_size:]
+    test_input = ts(np.stack(test_data["input"].to_list(), axis=0)).to(device)
+    test_action = torch.tensor(test_data["action"].to_numpy(dtype=np.int), dtype=torch.long).unsqueeze(-1).to(device)
+    test_output = ts(test_data["reward"].to_numpy()).to(device)
+
+    for T in range(n_passes):
+        print("    pass #{}".format(T))
+        for i in range(n_batches):
+            batch_data = data.sample(n=batch_size)
+            _input = np.stack(batch_data["input"].to_list(), axis=0)
+            _action = batch_data["action"].to_numpy(dtype=np.int)
+            _output = batch_data["reward"].to_numpy(dtype=np.float)
+            _pred = adv_net(ts(_input).to(device))
+
+            adv_loss = loss_fn(torch.gather(_pred, 1,
+                                            torch.tensor(_action, dtype=torch.long).unsqueeze(-1)).squeeze().to(device),
+                               ts(_output).to(device))
+
+            if verbose:
+                if (i + 1) % 20 == 0:
+                    test_pred = adv_net(test_input)
+                    test_loss = loss_fn(torch.gather(test_pred, 1, test_action).squeeze(), test_output)
+                    print(test_loss.item())
+
+            adv_optimizer.zero_grad()
+            adv_loss.backward()
+            adv_optimizer.step()
+
+
+def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_queue):
+    remain_jobs = total_jobs
+    while remain_jobs > 0:
+        n_jobs = min(batch_size, remain_jobs)
+        ids = []
+        inputs = []
+        for i in range(n_jobs):
+            _id, _input = job_queue.get(block=True)
+            ids.append(_id)
+            inputs.append(_input)
+
+        results = net(ts(inputs)).detach().numpy()
+        for i in range(n_jobs):
+            worker_conns[ids[i]].send(results[i])
+        remain_jobs -= n_jobs
+        # print(remain_jobs)
+
+
+# def _sample1(_id, size, n, main_conn, pro_queue, opp_queue):
+#     for i in range(n):
+#         p = [0.2]
+#         opp_pos = np.random.randint(size, size=2) + 0.5
+#         pro_pos = np.random.randint(size, size=2) % np.array([size, size // 2]) + 0.5
+#         # opp_pos = np.random.rand(2) * np.array([env.size, env.size])
+#         # pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
+#         opp_type = np.random.choice([0, 1], p=[p[0], 1 - p[0]])
+#
+#         pro_input = np.concatenate((p, opp_pos, pro_pos))
+#         opp_input = np.concatenate(([opp_type], p, opp_pos, pro_pos))
+#
+#         extended_pro_input = _extend_input(pro_input, False)
+#         extended_opp_input = _extend_input(opp_input, True)
+#
+#         pro_queue.put((_id, extended_pro_input))
+#         opp_queue.put((_id, extended_opp_input))
+#
+#         main_conn.send((opp_pos, pro_pos, pro_input, opp_input, opp_type))
+#
+#
+# def _sample2(_id, env, n, main_conn, pro_conn, opp_conn):
+#     for i in range(n):
+#         pro_action = act_on_adv(pro_conn.recv())
+#         opp_action = act_on_adv(opp_conn.recv())
+#
+#         opp_pos, pro_pos, pro_input, opp_input, opp_type = main_conn.recv()
+#
+#         _, _, opp_r, pro_r = env.step(opp_type, opp_pos, pro_pos, opp_action, pro_action)
+#
+#         main_conn.send((pro_input, pro_action, pro_r, opp_input, opp_action, opp_r))
+
+
+def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn):
+    for i in range(n):
+        p = [0.3]
+        opp_pos = np.random.randint(env.size, size=2) + 0.5
+        pro_pos = np.random.randint(env.size, size=2) % np.array([env.size, env.size // 2]) + 0.5
+        # opp_pos = np.random.rand(2) * np.array([env.size, env.size])
+        # pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
+        opp_type = np.random.choice([0, 1], p=[p[0], 1 - p[0]])
+
+        pro_input = np.concatenate((p, opp_pos, pro_pos))
+        opp_input = np.concatenate(([opp_type], p, opp_pos, pro_pos))
+
+        extended_pro_input = _extend_input(pro_input, False)
+        extended_opp_input = _extend_input(opp_input, True)
+
+        pro_queue.put((_id, extended_pro_input))
+        opp_queue.put((_id, extended_opp_input))
+
+        pro_action = act_on_adv(pro_conn.recv())
+        opp_action = act_on_adv(opp_conn.recv())
+
+        # print(_id)
+
+        _, _, opp_r, pro_r = env.step(opp_type, opp_pos, pro_pos, opp_action, pro_action)
+
+        # print(pro_input, pro_action, pro_r, opp_input, opp_action, opp_r)
+
+        main_conn.send((pro_input, pro_action, pro_r, opp_input, opp_action, opp_r))
+
+
+def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer):
+    if n_samples == 0:
+        return
+    batch_size = 50
+    concurrency = 50
+    n = n_samples // concurrency
+    assert n_samples % n == 0
+
+    import torch.multiprocessing as mp
+
+    sst = time.time()
+
+    pro_adv_net.share_memory()
+    opp_adv_net.share_memory()
+
+    buffer = mp.Queue()
+    sema = mp.Semaphore(10)
+
+    opp_worker_recv_conns = []
+    opp_worker_send_conns = []
+    pro_worker_recv_conns = []
+    pro_worker_send_conns = []
+    main_worker_conns = []
+    worker_main_conns = []
+    worker_locks = []
+    for i in range(concurrency):
+        conn1, conn2 = mp.Pipe()
+        opp_worker_recv_conns.append(conn1)
+        opp_worker_send_conns.append(conn2)
+        conn1, conn2 = mp.Pipe()
+        pro_worker_recv_conns.append(conn1)
+        pro_worker_send_conns.append(conn2)
+        conn1, conn2 = mp.Pipe()
+        main_worker_conns.append(conn1)
+        worker_main_conns.append(conn2)
+        worker_locks.append(mp.Lock())
+
+    main_pro, pro_main = mp.Pipe()
+    main_opp, opp_main = mp.Pipe()
+
+    pro_queue = mp.Queue()
+    pro_p = mp.Process(target=model_executor, args=(pro_adv_net, batch_size, n_samples,
+                                                    pro_main, pro_worker_send_conns, pro_queue))
+    opp_queue = mp.Queue()
+    opp_p = mp.Process(target=model_executor, args=(opp_adv_net, batch_size, n_samples,
+                                                    opp_main, opp_worker_send_conns, opp_queue))
+
+    pro_p.start()
+    opp_p.start()
+
+    ps = []
+    for i in range(concurrency):
+        p = mp.Process(target=_sample, args=(i, env, n, worker_main_conns[i], pro_queue,
+                                             pro_worker_recv_conns[i], opp_queue, opp_worker_recv_conns[i]))
+        p.start()
+        ps.append(p)
+
+    st = time.time()
+    for j in range(n):
+        for i in range(concurrency):
+            pro_input, pro_action, pro_r, opp_input, opp_action, opp_r = main_worker_conns[i].recv()
+            pro_v_buffer["input"].append(pro_input)
+            pro_v_buffer["action"].append(pro_action)
+            pro_v_buffer["reward"].append(pro_r)
+            opp_v_buffer["input"].append(opp_input)
+            opp_v_buffer["action"].append(opp_action)
+            opp_v_buffer["reward"].append(opp_r)
+        # if (j + 1) % 100 == 0:
+        #     dti = time.time() - st
+        #     print(dti, (n - j) * dti / 100)
+        #     st = time.time()
+
+    for p in ps:
+        p.join()
+
+    pro_p.join()
+    opp_p.join()
+
+    # cur_i = 0
+    # while cur_i < n_samples:
+    #     batch_rem = min(batch_size, n_samples - cur_i)
+    #     ps1 = []
+    #     ps2 = []
+    #     for i in range(batch_rem // n):
+    #         # worker_locks[i].acquire()
+    #         p1 = mp.Process(target=_sample1, args=(i, env.size, n, worker_main_conns[i], pro_queue, opp_queue))
+    #         ps1.append(p1)
+    #         p2 = mp.Process(target=_sample2, args=(i, env, n, worker_main_conns[i], pro_worker_recv_conns[i],
+    #                                                opp_worker_recv_conns[i]))
+    #         ps2.append(p2)
+    #     st_i = 0
+    #     im_data = []
+    #     while st_i * n < batch_rem:
+    #         sst = time.time()
+    #         n_now = min(concurrency, batch_rem // n - st_i)
+    #         for i in range(n_now):
+    #             ps1[st_i + i].start()
+    #         for i in range(n_now):
+    #             d = []
+    #             for j in range(n):
+    #                 d.append(main_worker_conns[st_i + i].recv())
+    #             im_data.append(d)
+    #             ps1[st_i + i].join()
+    #         st_i += n_now
+    #         print(1, st_i, time.time() - sst)
+    #
+    #     main_pro.recv()
+    #     main_opp.recv()
+    #
+    #     st_i = 0
+    #     while st_i * n < batch_rem:
+    #         sst = time.time()
+    #         n_now = min(concurrency, batch_rem // n - st_i)
+    #         for i in range(n_now):
+    #             ps2[st_i + i].start()
+    #             for j in range(n):
+    #                 main_worker_conns[st_i + i].send(im_data[st_i + i][j])
+    #         for i in range(n_now):
+    #             for j in range(n):
+    #                 pro_input, pro_action, pro_r, opp_input, opp_action, opp_r = main_worker_conns[st_i + i].recv()
+    #
+    #                 pro_v_buffer["input"].append(pro_input)
+    #                 pro_v_buffer["action"].append(pro_action)
+    #                 pro_v_buffer["reward"].append(pro_r)
+    #                 opp_v_buffer["input"].append(opp_input)
+    #                 opp_v_buffer["action"].append(opp_action)
+    #                 opp_v_buffer["reward"].append(opp_r)
+    #
+    #             ps2[st_i + i].join()
+    #
+    #         st_i += n_now
+    #         print(2, st_i, time.time() - sst)
+    #         # print(st_i)
+    #
+    #     cur_i += batch_rem
+
+    # for i in range(n_samples):
+    #     pro_input, pro_action, pro_r, opp_input, opp_action, opp_r = buffer.get(block=True)
+    #     # print(i)
+    #
+    #     pro_v_buffer["input"].append(pro_input)
+    #     pro_v_buffer["action"].append(pro_action)
+    #     pro_v_buffer["reward"].append(pro_r)
+    #     opp_v_buffer["input"].append(opp_input)
+    #     opp_v_buffer["action"].append(opp_action)
+    #     opp_v_buffer["reward"].append(opp_r)
+    #
+    # for p in ps:
+    #     p.join()
+
+    print("Sample time:", time.time() - sst)
+
+
+def _extend_input(_input, is_opp):
+    if not isinstance(_input, np.ndarray):
+        _input = np.array(_input)
+    if (is_opp and _input.shape[0] == 8) or (not is_opp and _input.shape[0] == 6):
+        return _input
+    if is_opp:
+        tp = _input[0]
+        _input = _input[1:]
+    else:
+        tp = None
+    p = _input[0]
+    opp_pos = _input[1:3]
+    pro_pos = _input[3:]
+
+    new_inputs = [[p], opp_pos, pro_pos, [np.sum(np.square(pro_pos - opp_pos))]]
+    if is_opp:
+        new_inputs = [[1., 0.] if tp < 0.5 else [0., 1.]] + new_inputs
+
+    return np.concatenate(new_inputs)
+
+
+def extend_input(buffer, is_opp):
+    for i in range(len(buffer["input"])):
+        buffer["input"][i] = _extend_input(buffer["input"][i], is_opp)
+        if not is_opp:
+            x = buffer["input"][i]
+            dis = x[5]
+            # if buffer["action"][i] == 4:
+            #     print(x, buffer["reward"][i])
+
+        # print(buffer["input"][i])
+
+
+def save_buffer(buffer: dict, filename):
+    import joblib
+    import copy
+    _buffer = copy.deepcopy(buffer)
+    for k in _buffer.keys():
+        _buffer[k] = np.array(_buffer[k])
+    joblib.dump(_buffer, filename)
+
+
+def load_buffer(filename):
+    import joblib
+    buffer = joblib.load(filename)
+    for k in buffer.keys():
+        if isinstance(buffer[k], np.ndarray):# and len(buffer[k].shape) > 1:
+            buffer[k] = list(buffer[k])
+        # print(type(buffer[k]), type(buffer[k][0]))
+    return buffer
+
+
+def cfr(env):
+    gpu = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    cpu = torch.device("cpu")
+    device = cpu
+    # print(device)
+    hidden_dim = 32
+    pro_input_n = 6
+    opp_input_n = 8
+    pro_v_net = ValueNet(pro_input_n, hidden_dim, 1).to(device)
+    pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6).to(device)
+    opp_v_net = ValueNet(opp_input_n, hidden_dim, 1).to(device)
+    opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4).to(device)
+
+    # print(pro_v_net(ts(np.random.randn(6)).to(device)))
+
+    pro_adv_net.zero_()
+    opp_adv_net.zero_()
+
+    n_iter = 5
+    batch_size = 5000
+    n_batches = 100
+
+    pro_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
+    opp_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
+
+    def display(p, ox, oy, px, py):
+        pro_input = ts(_extend_input([p, ox, oy, px, py], False)).to(device)
+        opp_input_0 = ts(_extend_input([0., p, ox, oy, px, py], True)).to(device)
+        opp_input_1 = ts(_extend_input([1., p, ox, oy, px, py], True)).to(device)
+        print("pro_v:", pro_v_net(pro_input)[0].item())
+        print("opp_v:", opp_v_net(opp_input_0)[0].item(),
+              opp_v_net(opp_input_1)[0].item())
+        print("pro_adv:", pro_adv_net(pro_input).detach().numpy())
+        print("opp_adv:", opp_adv_net(opp_input_0).detach().numpy(),
+              opp_adv_net(opp_input_1).detach().numpy())
+
+    display(0.3, 3.5, 2.5, 3.5, 2.5)
+    display(0.3, 3.5, 2.5, 3.5, 0.5)
+
+    load = True
+    save = True
+
+    for it in range(n_iter):
+        print("Iteration #", it)
+
+        if it == 0 and load:
+            pro_v_buffer = load_buffer("pro_v_buffer.obj")
+            # print(type(pro_v_buffer["input"]))
+            opp_v_buffer = load_buffer("opp_v_buffer.obj")
+        else:
+            pro_v_buffer = dict(input=[], action=[], reward=[])
+            opp_v_buffer = dict(input=[], action=[], reward=[])
+
+        n_train = batch_size * n_batches
+        n_test = int(n_train * 0.1)
+        n_samples = n_train + n_test
+
+        sample(env, n_samples - len(pro_v_buffer["input"]), pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
+
+        if it == 0 and save:
+            save_buffer(pro_v_buffer, "pro_v_buffer.obj")
+            save_buffer(opp_v_buffer, "opp_v_buffer.obj")
+
+        extend_input(pro_v_buffer, False)
+        extend_input(opp_v_buffer, True)
+
+        pro_v_net.reinitialize()
+        opp_v_net.reinitialize()
+
+        pro_v_df = pd.DataFrame(pro_v_buffer)
+        opp_v_df = pd.DataFrame(opp_v_buffer)
+
+        pro_v_df.sample(frac=1).reset_index(drop=True)  # shuffle
+        opp_v_df.sample(frac=1).reset_index(drop=True)  # shuffle
+
+        st = time.time()
+
+        lr = 1e-2
+        verbose = True
+        _train_v_net = partial(train_v_net, n_batches, batch_size, lr)
+        print("Training pro_v_net")
+        _train_v_net(pro_v_net, pro_v_df, verbose, True, 10)
+        print("Training opp_v_net")
+        _train_v_net(opp_v_net, opp_v_df, verbose, True, 10)
+
+        _train_adv_net = partial(train_adv_net, n_batches, batch_size, lr)
+        pro_adv_df = pro_adv_df.append(gen_adv_data(pro_v_df, pro_v_net), ignore_index=True)
+        # print(pro_adv_df.shape)
+        pro_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
+        print("Training pro_adv_net")
+        _train_adv_net(pro_adv_net, pro_adv_df, verbose, True, 10)
+
+        # while True:
+        #     display(0.1, 3.5, 3.5, 3.5, 3.5)
+        #     prompt = input()
+        #     if prompt == "cont":
+        #         break
+        #     _train_adv_net(pro_adv_net, pro_adv_df, verbose, False)
+
+        opp_adv_df = opp_adv_df.append(gen_adv_data(opp_v_df, opp_v_net), ignore_index=True)
+        opp_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
+        print("Training opp_adv_net")
+        _train_adv_net(opp_adv_net, opp_adv_df, verbose, True, 10)
+
+        print("Time: {}s".format(time.time() - st))
+
+        display(0.3, 3.5, 2.5, 3.5, 2.5)
+        display(0.3, 3.5, 2.5, 3.5, 0.5)
+
+    while True:
+        x = input()
+        if x == "cont":
+            break
+        try:
+            p, ox, oy, px, py = map(float, x.split())
+            display(p, ox, oy, px, py)
+        except ValueError:
+            continue
+
+
 def main():
     np.set_printoptions(precision=3, suppress=True)
     env = TaggingGame(8)
     # reader = ApproximatedReader("tagging-8_cfr")
-    reader = None
-    # run(env, 7, 200)
-    interactive(env, 1000, reader)
+    # reader = None
+    cfr(env)
+    # run(env, 11, 1000, reader)
+    # interactive(env, 1000, reader)
     # plot(env, 0.1, 2000, 100)
     # plot2(env, 11, 100)
     # train_net(env, 10000, 100)
+
+
+def test_time():
+    n = 10000
+    net = ValueNet(6, 32, 4)
+
+    data = np.random.randn(n, 6)
+    inputs = list(map(ts, list(data)))
+
+    st = time.time()
+    s1 = np.zeros(4)
+    for i in range(n):
+        s1 += net(inputs[i]).detach().numpy()
+    print(time.time() - st)
+
+    inputs = ts(data)
+
+    st = time.time()
+    s2 = np.zeros(4)
+    ret = net(inputs).detach().numpy()
+    for i in range(n):
+        s2 += ret[i]
+
+    print(time.time() - st)
+    print(s2 - s1)
+
+
+def _numpy_test(lock):
+    lock.acquire()
+    print("1232")
+    return 0
+
+
+def test_numpy_parallel():
+    n = 1000
+
+    import torch.multiprocessing as mp
+
+    st = time.time()
+
+    ps = []
+    lock = mp.Lock()
+    lock.acquire()
+    for i in range(n):
+        for _ in range(500):
+            p = mp.Process(target=_numpy_test, args=(lock,))
+            p.start()
+            # p.join()
+            ps.append(p)
+
+        st = time.time()
+        b = np.random.randn(120)
+        for _ in range(1000):
+            a = np.random.randn(120)
+            b += a
+        print(time.time() - st, b.sum())
+
+    for i in range(n):
+        ps[i].join()
+
+    print(time.time() - st)
 
 
 if __name__ == "__main__":

@@ -33,8 +33,19 @@ def get_parser(name):
     return parser
 
 
+def to_np(v):
+    if type(v) == torch.Tensor:
+        return dt(v)
+    else:
+        return np.array(v)
+
+
 def ts(v):
     return torch.tensor(v, dtype=torch.float)
+
+
+def dt(v):
+    return v.detach().numpy()
 
 
 def regularize(a):
@@ -49,8 +60,8 @@ def get_filename(args, n_rounds=None, n_iter=None):
     i = n_iter if n_iter is not None else args.n_iter
     if args.demo:
         name = "demo"
-    elif args.sep:
-        name = "sec-sep"
+    # elif args.sep:
+    #     name = "sec-sep"
     else:
         name = "sec"
     if args.cfr:
@@ -263,7 +274,7 @@ def _pred(n, n_iters, avs):
         # print(a, l, b)
 
     error = np.mean(np.abs(np.array(avs[-n:]) - np.array([a * (i ** l) + b for i in range(n_iters - n, n_iters)]))) / np.mean(np.abs(np.array(avs[-n:])))
-    print("a:", a, "l:", l, "error:", error, "b:", b)
+    # print("a:", a, "l:", l, "error:", error, "b:", b)
 
     xs = np.array(list(range(n_iters - n, n_iters)))
     # ys = a * np.power(xs, l) + b
@@ -278,7 +289,7 @@ def _pred(n, n_iters, avs):
     # if error > 1e-2:
     #     return None
     predict = a * np.power(100000, l) + b
-    print("predict", predict)
+    # print("predict", predict)
     return predict
     # return b
 

@@ -31,7 +31,7 @@ class CubicSplinePack(nn.Module):
         # print(self.cs(0.8))
 
     def forward(self, b):
-        x = b[:, 0]
+        x = b[0]
         v = torch.zeros_like(x)
         k = 3
         # l = 0
@@ -127,14 +127,14 @@ class Interp1dPackFast(nn.Module):
         # print(xs, ys)
         # print(self.cs(0.8))
 
-    def forward(self, b):
+    def forward(self, b, eps=None):
         x = b[0]
         i = min(self.n - 2, int(x.detach().item() / self.dis + 1e-5))
         wa = x - ts(self.xs[i])
         wb = ts(self.xs[i + 1]) - x
         w = ts(self.xs[i + 1] - self.xs[i])
         # print(self.ys[i], self.ys[i + 1])
-        return wb / w * ts(self.ys[i]) + wa / w * ts(self.ys[i + 1])
+        return (wb / w * ts(self.ys[i]) + wa / w * ts(self.ys[i + 1])).detach()
 
 
 class NNPack(nn.Module):

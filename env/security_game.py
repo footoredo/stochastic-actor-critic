@@ -19,16 +19,16 @@ def update_belief(belief, prob):
 class SecurityGame(object):
     def __init__(self, n_slots, n_types, prior, n_rounds, beta=1.0, value_low=5., value_high=10., seed=None,
                  random_prior=False):
+        self.rng = np.random.RandomState(seed=seed)
+
         self.n_slots = n_slots
         self.n_types = n_types
-        self.prior = prior if prior is not None else self.rng.rand(n_types)
+        self.prior = prior if prior is not None else np.zeros(n_types)
         self.prior /= np.sum(self.prior)
         self.n_rounds = n_rounds
         self.seed = seed
         self.random_prior = random_prior
         self.beta = beta
-
-        self.rng = np.random.RandomState(seed=seed)
 
         value_range = value_high - value_low
         atk_rew = self.rng.rand(n_types, n_slots) * value_range + value_low
@@ -49,6 +49,7 @@ class SecurityGame(object):
                         # self.payoff[t, i, j, 1] = -atk_rew[t, i]
                         self.payoff[t, i, j, 1] = dfd_pen[j]
 
+        # print(self.payoff)
         self.ob_len = [n_types * 2 + n_rounds, n_types + n_rounds]
 
         self.belief = None
@@ -123,7 +124,7 @@ class SecurityGame(object):
             p = []
             for entry in profile[at]:
                 p.append(entry[1])
-            print(at, p)
+            # print(at, p)
         return strategy
 
     def _convert_defender_strategy(self, attacker_strategy, defender_strategy):
@@ -147,7 +148,7 @@ class SecurityGame(object):
         p = []
         for entry in profile:
             p.append(entry[1])
-        print(p)
+        # print(p)
         return strategy
 
     def calc_vn(self, attacker_strategy, defender_strategy, batch_size, train_steps):
@@ -188,8 +189,9 @@ class SecurityGame(object):
 
         return atk_vn, dfd_vn
 
-    def _assess_strategies(self, strategies):
-        print("prior:", self.prior)
+    def _assess_strategies(self, strategies, verbose):
+        if verbose:
+            print("prior:", self.prior)
         attacker_strategy, defender_strategy = strategies
         tas = self._convert_attacker_strategy(attacker_strategy, defender_strategy)
         tds = self._convert_defender_strategy(attacker_strategy, defender_strategy)
@@ -202,11 +204,12 @@ class SecurityGame(object):
                 if len(k) < 3:
                     print(t, k, v)
 
-        print("Attacker:")
-        for t in range(self.n_types):
-            display(tas[t], str(t))
-        print("Defender:")
-        display(tds)
+        if verbose:
+            print("Attacker:")
+            for t in range(self.n_types):
+                display(tas[t], str(t))
+            print("Defender:")
+            display(tds)
 
         def cut(s):
             if len(s) == 2:
@@ -242,7 +245,8 @@ class SecurityGame(object):
             def_pbne_eps = max(def_pbne_eps, atk_br[h] - v)
             def_result.append((self.decode_history(h), atk_br[h] - v))
 
-        print("PBNE:", atk_pbne_eps, def_pbne_eps)
+        if verbose:
+            print("PBNE:", atk_pbne_eps, def_pbne_eps)
 
         atk_eps = [0.] * self.n_types
         initial_state = self.encode_history([])
@@ -251,13 +255,16 @@ class SecurityGame(object):
 
         def_eps = atk_br[initial_state] - def_u[initial_state]
 
-        print("BR:", [def_br[t][initial_state] for t in range(self.n_types)], atk_br[initial_state])
-        print("Payoff:", [atk_u[t][initial_state] for t in range(self.n_types)], def_u[initial_state])
+        if verbose:
+            print("BR:", [def_br[t][initial_state] for t in range(self.n_types)], atk_br[initial_state])
+            print("Payoff:", [atk_u[t][initial_state] for t in range(self.n_types)], def_u[initial_state])
 
-        print("Overall:", atk_eps, def_eps)
+            print("Overall:", atk_eps, def_eps)
 
         for_sheet += atk_eps + [def_eps] + [atk_u[t][initial_state] for t in range(self.n_types)] + [def_u[initial_state]]
-        print("\t".join(list(map(str, for_sheet))))
+
+        if verbose:
+            print("\t".join(list(map(str, for_sheet))))
 
         return ((atk_eps, atk_pbne_eps), (def_eps, def_pbne_eps)), ([atk_u[t][initial_state] for t in range(self.n_types)], def_u[initial_state])
 
@@ -272,9 +279,9 @@ class SecurityGame(object):
         if self.random_prior and self.n_types == 2:
             for x in range(11):
                 self.prior = np.array([x / 10., (10 - x) / 10.])
-                self._assess_strategies(strategies)
+                self._assess_strategies(strategies, verbose)
         else:
-            return self._assess_strategies(strategies)
+            return self._assess_strategies(strategies, verbose)
 
         if verbose:
             raise NotImplementedError

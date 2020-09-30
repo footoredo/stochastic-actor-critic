@@ -27,12 +27,13 @@ def _load_vn(interp, data):
         "nn": NNPack
     }
     interp_pack = interp_dict[interp]
-    atk_vn = interp_pack(data[[0, 1, 2], :].transpose())
-    dfd_vn = interp_pack(data[[0, 3], :].transpose())
+    vn = interp_pack(data)
+    # atk_vn = interp_pack(data[[0, 1, 2], :].transpose())
+    # dfd_vn = interp_pack(data[[0, 3], :].transpose())
 
     # _plot(data, atk_vn)
 
-    return atk_vn, dfd_vn
+    return vn
 
 
 def load_vn(filename, interp="linear_fast"):
@@ -41,10 +42,8 @@ def load_vn(filename, interp="linear_fast"):
     if type(interp) == str:
         return _load_vn(interp, data)
     else:
-        atk_vns = []
-        dfd_vns = []
+        vns = []
         for _interp in interp:
-            atk_vn, dfd_vn = _load_vn(_interp, data)
-            atk_vns.append(atk_vn)
-            dfd_vns.append(dfd_vn)
-        return atk_vns, dfd_vns
+            vn = _load_vn(_interp, data)
+            vns.append(vn)
+        return vns

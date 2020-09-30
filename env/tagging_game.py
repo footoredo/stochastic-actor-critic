@@ -30,7 +30,7 @@ class TaggingGame(object):
         else:
             return p
 
-    def step(self, opp_type, opp_pos, pro_pos, opp_action, pro_action):
+    def step(self, opp_type, opp_pos, pro_pos, opp_action, pro_action, prob_count=1):
         opp_reward = 0.
         pro_reward = 0.
 
@@ -42,6 +42,9 @@ class TaggingGame(object):
                     pro_reward -= 20.
                 else:  # enemy
                     pro_reward += 10.
+
+        if pro_action == 5:  # prob
+            pro_reward -= 0.25 * prob_count
 
         new_opp_pos = self._move(opp_pos, opp_action, False)
         if pro_action < 4:
