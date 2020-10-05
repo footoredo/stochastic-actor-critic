@@ -26,6 +26,7 @@ def parse_args():
     parser = get_parser("mmmm")
     parser.add_argument('--load-n-iter', type=int)
     parser.add_argument('--n-samples', type=int, default=20)
+    parser.add_argument('--budget', type=int, default=0)
     parser.add_argument('--build', action="store_true", default=False)
     # parser.add_argument('--sep', action="store_true", default=False)
     parser.add_argument('--cfr', action="store_true", default=False)
@@ -217,9 +218,11 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
                 new_belief = ts(new_belief)
                 for b in range(n_slots):
                     atk_r = payoff[t, a, b, 0] + (atk_vn(new_belief)[t] * ratio if atk_vn is not None else 0.)
+                    # print(dfd_vn(new_belief))
                     dfd_r = payoff[t, a, b, 1] + (dfd_vn(new_belief) * ratio if dfd_vn is not None else 0.)
                     atk_u[t, a] += atk_r * dfd_s[b]
                     atk_au[t] += atk_r * a_s[t, a] * d_s[b]
+                    # print(dfd_r, prior[t], a_s[t, a])
                     dfd_u[b] += dfd_r * prior[t] * a_s[t, a]
                     dfd_au += dfd_r * prior[t] * a_s[t, a] * d_s[b]
         return atk_u, atk_au, dfd_u, dfd_au
@@ -703,8 +706,8 @@ def build_strategy(args, n_slots, n_types, n_rounds, ps, payoff, n_iter, atk_vns
             if args.verbose:
                 print("Depth: {}, with {} instance(s) to run.".format(i, len(queue)))
                 print([x[2] for x in queue])
-            if False:
-            # if i > 0 and atk_sns is not None and dfd_sns is not None:
+            # if False:
+            if i > 0 and atk_sns is not None and dfd_sns is not None:
                 atk_sn = atk_sns[remain]
                 dfd_sn = dfd_sns[remain]
                 runner = RunnerWithSn(args.n_types, args.n_slots, atk_sn, dfd_sn)
@@ -734,6 +737,8 @@ def build_strategy(args, n_slots, n_types, n_rounds, ps, payoff, n_iter, atk_vns
                     if remain > 0:
                         for a in range(n_slots):
                             new_belief = bayes(ts(belief), ts(atk_ts), a).detach().numpy()
+                            if any(np.isnan(new_belief)):
+                                new_belief = [0.5]
                             # print(new_belief)
                             next_queue.append((idx, h + [a], new_belief[0]))
             queue = next_queue
@@ -789,13 +794,17 @@ def main():
 
     if args.all:
         ps = []
-
         n_samples = args.n_samples
-        for i in range(n_samples):
+
+        left = 0.0
+        right = 1.0
+        dis = (right - left) / n_samples
+
+        for i in range(n_samples + 1):
             # p = np.random.random()
-            p = i / n_samples
+            p = i * dis + left
             ps.append(p)
-        ps.append(1.0)
+        # ps.append(1.0)
     else:
         n_samples = 1
         ps = [args.prior[0]]
@@ -887,6 +896,66 @@ def main():
 
             print("Time:", time.time() - st)
 
+        # diffs = []
+        # budgets = []
+        # sum_diff = 0.
+        # tn = len(ps) - 1
+        # for i in range(tn):
+        #     diff = np.max(np.abs(avs[i + 1] - avs[i]))
+        #     diffs.append(diff)
+        #     sum_diff += diff
+        #     budgets.append(0)
+        #
+        # budget = args.budget
+        # while budget > 0:
+        #     max_diff = 0.
+        #     max_i = 0
+        #     for i in range(tn):
+        #         if diffs[i] / (budgets[i] + 1) > max_diff:
+        #             max_diff = diffs[i] / (budgets[i] + 1)
+        #             max_i = i
+        #
+        #     budgets[max_i] += 1
+        #     budget -= 1
+        #
+        # new_ps = []
+        # for i in range(tn):
+        #     dis = (ps[i + 1] - ps[i]) / (budgets[i] + 1)
+        #     for j in range(budgets[i]):
+        #         new_ps.append(ps[i] + (j + 1) * dis)
+
+        breaks = []
+        tn = len(ps) - 1
+        for i in range(tn):
+            diff = np.max(np.abs(avs[i + 1] - avs[i]))
+            if diff > 0.1:
+                breaks.append(i)
+
+        new_ps = []
+        budget = args.budget
+        for i in breaks:
+            dis = (ps[i + 1] - ps[i]) / (budget + 1)
+            for j in range(budget):
+                new_ps.append(ps[i] + (j + 1) * dis)
+
+        print(new_ps)
+
+        if len(new_ps) > 0:
+            with Pool(12) as p:
+                if not args.cfr:
+                    vs = list(
+                        p.map(RunnerWithTest(args, payoff=env.payoff, atk_vn=atk_vn, dfd_vn=dfd_vn, use_pred=args.pred),
+                              new_ps))
+                else:
+                    vs = list(
+                        p.map(CFRRunner(args, payoff=env.payoff, atk_vn=atk_vn, dfd_vn=dfd_vn, use_pred=args.pred), new_ps))
+                new_avs, new_dvs, new_atk_tss, new_dfd_tss, _ = map(list, zip(*vs))
+            ps += new_ps
+            avs += new_avs
+            dvs += new_dvs
+            atk_tss += new_atk_tss
+            dfd_tss += new_dfd_tss
+
         if args.verbose:
             print(avs)
             print(dvs)
@@ -894,8 +963,9 @@ def main():
             avs = np.array(avs)
             print(avs.transpose().reshape(-1))
 
+            n = len(ps)
             df = pd.DataFrame(dict(p=ps + ps, v=list(avs.transpose().reshape(-1)),
-                                   t=["a"] * (n_samples + 1) + ["b"] * (n_samples + 1)))
+                                   t=["a"] * n + ["b"] * n))
             sns.lineplot(x="p", y="v", data=df, hue="t")
             if args.save_plot:
                 plt.savefig("plot/" + get_filename(args) + ".png", dpi=100)
@@ -903,7 +973,7 @@ def main():
                 plt.show()
 
         if args.save_data:
-            n = n_samples + 1
+            n = len(ps)
             ps = np.array(ps).reshape(n, 1)
             avs = np.array(avs).reshape(n, env.n_types)
             dvs = np.array(dvs).reshape(n, 1)

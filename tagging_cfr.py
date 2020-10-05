@@ -385,16 +385,19 @@ class ValueNet(nn.Module):
         super(ValueNet, self).__init__()
 
         self.linear1 = nn.Linear(input_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, output_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear3 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, _input):
-        h = self.linear1(_input)
-        x = self.linear2(F.tanh(h))
+        x = self.linear1(_input)
+        x = self.linear2(torch.tanh(x))
+        x = self.linear3(torch.tanh(x))
         return x
 
     def reinitialize(self):
         self.linear1.reset_parameters()
         self.linear2.reset_parameters()
+        self.linear3.reset_parameters()
 
     def zero_(self):
         with torch.no_grad():
@@ -402,17 +405,21 @@ class ValueNet(nn.Module):
             self.linear1.bias.zero_()
             self.linear2.weight.zero_()
             self.linear2.bias.zero_()
+            self.linear3.weight.zero_()
+            self.linear3.bias.zero_()
 
 
-def act_on_adv(adv):
+def act_on_adv(adv, rng=None):
+    if rng is None:
+        rng = np.random
     # print(adv)
     if np.sum(np.abs(adv)) < 1e-5:
-        return np.random.choice(range(adv.shape[0]))
+        return rng.choice(range(adv.shape[0]))
     if np.max(adv) <= 0.:
         return np.argmax(adv)
     else:
         s = np.maximum(adv, 0.)
-        return np.random.choice(range(s.shape[0]), p=s / s.sum())
+        return rng.choice(range(s.shape[0]), p=s / s.sum())
 
 
 def train_v_net(n_batches, batch_size, lr, v_net: ValueNet, data: pd.DataFrame, verbose=False, reinit=True, n_passes=3,
@@ -427,7 +434,7 @@ def train_v_net(n_batches, batch_size, lr, v_net: ValueNet, data: pd.DataFrame, 
     test_output = ts(test_data["reward"].to_numpy()).to(device)
 
     for T in range(n_passes):
-        print("    pass #{}".format(T))
+        # print("    pass #{}".format(T))
         for i in range(n_batches):
             _input = np.stack(data["input"][i * batch_size: (i + 1) * batch_size].to_list(), axis=0)
             _output = data["reward"][i * batch_size: (i + 1) * batch_size].to_numpy(dtype=np.float)
@@ -448,10 +455,10 @@ def train_v_net(n_batches, batch_size, lr, v_net: ValueNet, data: pd.DataFrame, 
 
 def gen_adv_data(v_data: pd.DataFrame, v_net: ValueNet):
     v_pred = dt(v_net(ts(v_data["input"])))
-    adv_data = pd.DataFrame(v_data)
-    for i in range(adv_data.shape[0]):
+    adv_data = v_data.copy()
+    for i in range(len(adv_data["input"])):
         delta = v_pred[i, 0]
-        adv_data.at[i, "reward"] -= delta
+        adv_data["reward"][i] -= delta
     return adv_data
 
 
@@ -468,12 +475,15 @@ def train_adv_net(n_batches, batch_size, lr, adv_net: ValueNet, data: pd.DataFra
     test_output = ts(test_data["reward"].to_numpy()).to(device)
 
     for T in range(n_passes):
-        print("    pass #{}".format(T))
+        # print("    pass #{}".format(T))
         for i in range(n_batches):
-            batch_data = data.sample(n=batch_size)
-            _input = np.stack(batch_data["input"].to_list(), axis=0)
-            _action = batch_data["action"].to_numpy(dtype=np.int)
-            _output = batch_data["reward"].to_numpy(dtype=np.float)
+            # batch_data = data.sample(n=batch_size)
+            _input = np.stack(data["input"][i * batch_size: (i + 1) * batch_size].to_list(), axis=0)
+            _action = data["action"][i * batch_size: (i + 1) * batch_size].to_numpy(dtype=np.int)
+            _output = data["reward"][i * batch_size: (i + 1) * batch_size].to_numpy(dtype=np.float)
+            # _input = np.stack(batch_data["input"].to_list(), axis=0)
+            # _action = batch_data["action"].to_numpy(dtype=np.int)
+            # _output = batch_data["reward"].to_numpy(dtype=np.float)
             _pred = adv_net(ts(_input).to(device))
 
             adv_loss = loss_fn(torch.gather(_pred, 1,
@@ -543,13 +553,15 @@ def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_que
 
 
 def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn):
+    rng = np.random.RandomState()
     for i in range(n):
-        p = [0.3]
-        opp_pos = np.random.randint(env.size, size=2) + 0.5
-        pro_pos = np.random.randint(env.size, size=2) % np.array([env.size, env.size // 2]) + 0.5
+        # p = [0.3]
+        p = np.random.rand(1)
+        opp_pos = rng.randint(env.size, size=2) + 0.5
+        pro_pos = rng.randint(env.size, size=2) % np.array([env.size, env.size // 2]) + 0.5
         # opp_pos = np.random.rand(2) * np.array([env.size, env.size])
         # pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
-        opp_type = np.random.choice([0, 1], p=[p[0], 1 - p[0]])
+        opp_type = rng.choice([0, 1], p=[p[0], 1 - p[0]])
 
         pro_input = np.concatenate((p, opp_pos, pro_pos))
         opp_input = np.concatenate(([opp_type], p, opp_pos, pro_pos))
@@ -560,8 +572,8 @@ def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn):
         pro_queue.put((_id, extended_pro_input))
         opp_queue.put((_id, extended_opp_input))
 
-        pro_action = act_on_adv(pro_conn.recv())
-        opp_action = act_on_adv(opp_conn.recv())
+        pro_action = act_on_adv(pro_conn.recv(), rng)
+        opp_action = act_on_adv(opp_conn.recv(), rng)
 
         # print(_id)
 
@@ -739,7 +751,12 @@ def _extend_input(_input, is_opp):
     opp_pos = _input[1:3]
     pro_pos = _input[3:]
 
-    new_inputs = [[p], opp_pos, pro_pos, [np.sum(np.square(pro_pos - opp_pos))]]
+    tag_available = np.sum(np.square(pro_pos - opp_pos)) < 2.5 * 2.5
+    if opp_pos[1] > 4.:
+        tag_available = False
+
+    new_inputs = [[p], opp_pos, pro_pos, opp_pos - pro_pos,
+                  [1. if tag_available else 0.]]
     if is_opp:
         new_inputs = [[1., 0.] if tp < 0.5 else [0., 1.]] + new_inputs
 
@@ -777,14 +794,33 @@ def load_buffer(filename):
     return buffer
 
 
+def _buffer_add(buffer, entry, size, tot):
+    if len(buffer["input"]) < size:
+        buffer["input"].append(entry[0])
+        buffer["action"].append(entry[1])
+        buffer["reward"].append(entry[2])
+    else:
+        replace = np.random.randint(tot)
+        if replace < size:
+            buffer["input"][replace] = entry[0]
+            buffer["action"][replace] = entry[1]
+            buffer["reward"][replace] = entry[2]
+
+
+def buffer_add(buffer, other_buffer, size, tot):
+    # print(other_buffer["input"])
+    for i in range(len(other_buffer["input"])):
+        _buffer_add(buffer, (other_buffer["input"][i], other_buffer["action"][i], other_buffer["reward"][i]), size, tot)
+
+
 def cfr(env):
     gpu = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     cpu = torch.device("cpu")
     device = cpu
     # print(device)
     hidden_dim = 32
-    pro_input_n = 6
-    opp_input_n = 8
+    pro_input_n = 8
+    opp_input_n = 10
     pro_v_net = ValueNet(pro_input_n, hidden_dim, 1).to(device)
     pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6).to(device)
     opp_v_net = ValueNet(opp_input_n, hidden_dim, 1).to(device)
@@ -795,9 +831,15 @@ def cfr(env):
     pro_adv_net.zero_()
     opp_adv_net.zero_()
 
-    n_iter = 5
+    n_iter = 1
     batch_size = 5000
-    n_batches = 100
+    n_batches = 20
+    lr = 5e-2
+    verbose = False
+    n_passes = 50
+    test_points = [(0.3, 3.5, 3.5, 3.5, 2.5), (0.3, 3.5, 3.5, 3.5, 0.5), (0.4, 3.5, 3.5, 3.5, 2.5)]
+    load = True
+    save = True
 
     pro_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
     opp_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
@@ -813,22 +855,22 @@ def cfr(env):
         print("opp_adv:", opp_adv_net(opp_input_0).detach().numpy(),
               opp_adv_net(opp_input_1).detach().numpy())
 
-    display(0.3, 3.5, 2.5, 3.5, 2.5)
-    display(0.3, 3.5, 2.5, 3.5, 0.5)
-
-    load = True
-    save = True
+    for p in test_points:
+        display(*p)
 
     for it in range(n_iter):
         print("Iteration #", it)
 
-        if it == 0 and load:
-            pro_v_buffer = load_buffer("pro_v_buffer.obj")
+        if load:
+            pro_v_buffer = load_buffer("models/pro_v_buffer_{}.obj".format(it))
             # print(type(pro_v_buffer["input"]))
-            opp_v_buffer = load_buffer("opp_v_buffer.obj")
+            opp_v_buffer = load_buffer("models/opp_v_buffer_{}.obj".format(it))
         else:
             pro_v_buffer = dict(input=[], action=[], reward=[])
             opp_v_buffer = dict(input=[], action=[], reward=[])
+
+        pro_adv_buffer = dict(input=[], action=[], reward=[])
+        opp_adv_buffer = dict(input=[], action=[], reward=[])
 
         n_train = batch_size * n_batches
         n_test = int(n_train * 0.1)
@@ -836,9 +878,12 @@ def cfr(env):
 
         sample(env, n_samples - len(pro_v_buffer["input"]), pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
 
-        if it == 0 and save:
-            save_buffer(pro_v_buffer, "pro_v_buffer.obj")
-            save_buffer(opp_v_buffer, "opp_v_buffer.obj")
+        # for i in range(100):
+        #     print(pro_v_buffer["input"][i], pro_v_buffer["action"][i], pro_v_buffer["reward"][i])
+
+        if save:
+            save_buffer(pro_v_buffer, "models/pro_v_buffer_{}.obj".format(it))
+            save_buffer(opp_v_buffer, "models/opp_v_buffer_{}.obj".format(it))
 
         extend_input(pro_v_buffer, False)
         extend_input(opp_v_buffer, True)
@@ -854,20 +899,19 @@ def cfr(env):
 
         st = time.time()
 
-        lr = 1e-2
-        verbose = True
         _train_v_net = partial(train_v_net, n_batches, batch_size, lr)
         print("Training pro_v_net")
-        _train_v_net(pro_v_net, pro_v_df, verbose, True, 10)
+        _train_v_net(pro_v_net, pro_v_df, verbose, True, n_passes)
         print("Training opp_v_net")
-        _train_v_net(opp_v_net, opp_v_df, verbose, True, 10)
+        _train_v_net(opp_v_net, opp_v_df, verbose, True, n_passes)
 
         _train_adv_net = partial(train_adv_net, n_batches, batch_size, lr)
-        pro_adv_df = pro_adv_df.append(gen_adv_data(pro_v_df, pro_v_net), ignore_index=True)
+        buffer_add(pro_adv_buffer, gen_adv_data(pro_v_buffer, pro_v_net), n_samples, (it + 1) * n_samples)
+        pro_adv_df = pd.DataFrame(pro_adv_buffer)
         # print(pro_adv_df.shape)
-        pro_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
+        # pro_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
         print("Training pro_adv_net")
-        _train_adv_net(pro_adv_net, pro_adv_df, verbose, True, 10)
+        _train_adv_net(pro_adv_net, pro_adv_df, verbose, True, n_passes)
 
         # while True:
         #     display(0.1, 3.5, 3.5, 3.5, 3.5)
@@ -876,15 +920,31 @@ def cfr(env):
         #         break
         #     _train_adv_net(pro_adv_net, pro_adv_df, verbose, False)
 
-        opp_adv_df = opp_adv_df.append(gen_adv_data(opp_v_df, opp_v_net), ignore_index=True)
-        opp_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
+        buffer_add(opp_adv_buffer, gen_adv_data(opp_v_buffer, opp_v_net), n_samples, (it + 1) * n_samples)
+        opp_adv_df = pd.DataFrame(opp_adv_buffer)
+        # opp_adv_df = opp_adv_df.append(gen_adv_data(opp_v_df, opp_v_net), ignore_index=True)
+        # opp_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
         print("Training opp_adv_net")
-        _train_adv_net(opp_adv_net, opp_adv_df, verbose, True, 10)
+        _train_adv_net(opp_adv_net, opp_adv_df, verbose, True, n_passes)
+
+        if save:
+            save_buffer(pro_adv_buffer, "models/pro_adv_buffer_{}.obj".format(it))
+            save_buffer(opp_adv_buffer, "models/opp_adv_buffer_{}.obj".format(it))
+
 
         print("Time: {}s".format(time.time() - st))
 
-        display(0.3, 3.5, 2.5, 3.5, 2.5)
-        display(0.3, 3.5, 2.5, 3.5, 0.5)
+        # if save:
+        #     pro_adv_df.to_pickle("models/pro_adv_df_{}.obj".format(it))
+        #     opp_adv_df.to_pickle("models/opp_adv_df_{}.obj".format(it))
+
+        for p in test_points:
+            display(*p)
+
+        torch.save(pro_v_net.state_dict(), "models/pro_v_{}.net".format(it))
+        torch.save(pro_adv_net.state_dict(), "models/pro_adv_{}.net".format(it))
+        torch.save(opp_v_net.state_dict(), "models/opp_v_{}.net".format(it))
+        torch.save(opp_adv_net.state_dict(), "models/opp_adv_{}.net".format(it))
 
     while True:
         x = input()

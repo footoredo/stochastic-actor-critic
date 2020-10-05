@@ -6,6 +6,7 @@ import os
 def parse_args():
     parser = get_parser("run_sec")
     parser.add_argument('--n-samples', type=int, default=20)
+    parser.add_argument('--budget', type=int, default=0)
     parser.add_argument('--start-round', type=int, default=1)
     parser.add_argument('--cfr', action="store_true", default=False)
     parser.add_argument('--pred', action="store_true", default=False)
@@ -15,7 +16,7 @@ def parse_args():
 def main():
     args = parse_args()
     command = "python mmmm.py --env-seed={env_seed} --n-slots={n_slots} --n-rounds={n_rounds} --n-iter={n_iter} " \
-              "--n-samples={n_samples} --build --all --save-data" + (" --cfr" if args.cfr else "") + \
+              "--n-samples={n_samples} --budget={budget} --build --all --save-data" + (" --cfr" if args.cfr else "") + \
               (" --pred" if args.pred else "")
     start_round = args.start_round
     n_rounds = args.n_rounds

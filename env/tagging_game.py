@@ -11,6 +11,7 @@ class TaggingGame(object):
         self.tag_lim = 1.5 if size == 4 else 2.5
         self.ally_base = np.array([0.5, size - 0.5])
         self.enemy_base = np.array([size - 0.5, size - 0.5])
+        self.rng = np.random.RandomState()
 
     def _x_inbound(self, x):
         return 0 <= x <= self.size
