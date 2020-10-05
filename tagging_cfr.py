@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from env.tagging_game import TaggingGame
 from multiprocessing import Process, Value, Pipe
@@ -502,6 +503,7 @@ def train_adv_net(n_batches, batch_size, lr, adv_net: ValueNet, data: pd.DataFra
 
 
 def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_queue):
+    rng = np.random.RandomState()
     remain_jobs = total_jobs
     while remain_jobs > 0:
         n_jobs = min(batch_size, remain_jobs)
@@ -512,7 +514,12 @@ def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_que
             ids.append(_id)
             inputs.append(_input)
 
-        results = net(ts(inputs)).detach().numpy()
+        if type(net) == list:
+            _net = net[rng.randint(len(net))]
+        else:
+            _net = net
+
+        results = _net(ts(inputs)).detach().numpy()
         for i in range(n_jobs):
             worker_conns[ids[i]].send(results[i])
         remain_jobs -= n_jobs
@@ -552,7 +559,8 @@ def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_que
 #         main_conn.send((pro_input, pro_action, pro_r, opp_input, opp_action, opp_r))
 
 
-def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn):
+def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn, pro_next_queue, pro_next_conn,
+            opp_next_queue, opp_next_conn):
     rng = np.random.RandomState()
     for i in range(n):
         # p = [0.3]
@@ -562,29 +570,54 @@ def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn):
         # opp_pos = np.random.rand(2) * np.array([env.size, env.size])
         # pro_pos = np.random.rand(2) * np.array([env.size, env.size / 2])
         opp_type = rng.choice([0, 1], p=[p[0], 1 - p[0]])
+        opp_other_type = 1 - opp_type
 
         pro_input = np.concatenate((p, opp_pos, pro_pos))
         opp_input = np.concatenate(([opp_type], p, opp_pos, pro_pos))
+        opp_other_input = np.concatenate(([opp_other_type], p, opp_pos, pro_pos))
 
         extended_pro_input = _extend_input(pro_input, False)
         extended_opp_input = _extend_input(opp_input, True)
+        extended_opp_other_input = _extend_input(opp_other_input, True)
 
         pro_queue.put((_id, extended_pro_input))
         opp_queue.put((_id, extended_opp_input))
+        opp_queue.put((_id, extended_opp_other_input))
 
         pro_action = act_on_adv(pro_conn.recv(), rng)
-        opp_action = act_on_adv(opp_conn.recv(), rng)
+        opp_strategy = opp_conn.recv()
+        opp_other_strategy = opp_conn.recv()
+        opp_action = act_on_adv(opp_strategy, rng)
+
+        s = [0., 0.]
+        s[opp_type] = opp_strategy[opp_action]
+        s[opp_other_type] = opp_other_strategy[opp_action]
+        new_p = (p * s[0]) / (p * s[0] + (1 - p) * s[1])
+
+        # print(p, s, new_p)
 
         # print(_id)
 
-        _, _, opp_r, pro_r = env.step(opp_type, opp_pos, pro_pos, opp_action, pro_action)
+        new_opp_pos, new_pro_pos, opp_r, pro_r = env.step(opp_type, opp_pos, pro_pos, opp_action, pro_action)
+
+        if pro_next_queue is not None:
+            new_pro_input = np.concatenate((new_p, new_opp_pos, new_pro_pos))
+            new_opp_input = np.concatenate(([opp_type], new_p, new_opp_pos, new_pro_pos))
+            new_extended_pro_input = _extend_input(new_pro_input, False)
+            new_extended_opp_input = _extend_input(new_opp_input, True)
+            pro_next_queue.put((_id, new_extended_pro_input))
+            opp_next_queue.put((_id, new_extended_opp_input))
+
+            pro_r += pro_next_conn.recv()
+            opp_r += opp_next_conn.recv()
 
         # print(pro_input, pro_action, pro_r, opp_input, opp_action, opp_r)
 
         main_conn.send((pro_input, pro_action, pro_r, opp_input, opp_action, opp_r))
 
 
-def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer):
+def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer, pro_next_v_net, opp_next_v_net):
+    has_next = pro_next_v_net is not None
     if n_samples == 0:
         return
     batch_size = 50
@@ -596,8 +629,14 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
 
     sst = time.time()
 
-    pro_adv_net.share_memory()
-    opp_adv_net.share_memory()
+    if type(pro_adv_net) == list:
+        for net in pro_adv_net:
+            net.share_memory()
+        for net in opp_adv_net:
+            net.share_memory()
+    else:
+        pro_adv_net.share_memory()
+        opp_adv_net.share_memory()
 
     buffer = mp.Queue()
     sema = mp.Semaphore(10)
@@ -606,6 +645,10 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
     opp_worker_send_conns = []
     pro_worker_recv_conns = []
     pro_worker_send_conns = []
+    next_opp_worker_recv_conns = []
+    next_opp_worker_send_conns = []
+    next_pro_worker_recv_conns = []
+    next_pro_worker_send_conns = []
     main_worker_conns = []
     worker_main_conns = []
     worker_locks = []
@@ -616,6 +659,19 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
         conn1, conn2 = mp.Pipe()
         pro_worker_recv_conns.append(conn1)
         pro_worker_send_conns.append(conn2)
+        if has_next:
+            conn1, conn2 = mp.Pipe()
+            next_opp_worker_recv_conns.append(conn1)
+            next_opp_worker_send_conns.append(conn2)
+            conn1, conn2 = mp.Pipe()
+            next_pro_worker_recv_conns.append(conn1)
+            next_pro_worker_send_conns.append(conn2)
+        else:
+            next_opp_worker_recv_conns.append(None)
+            next_opp_worker_send_conns.append(None)
+            next_pro_worker_recv_conns.append(None)
+            next_pro_worker_send_conns.append(None)
+
         conn1, conn2 = mp.Pipe()
         main_worker_conns.append(conn1)
         worker_main_conns.append(conn2)
@@ -628,8 +684,24 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
     pro_p = mp.Process(target=model_executor, args=(pro_adv_net, batch_size, n_samples,
                                                     pro_main, pro_worker_send_conns, pro_queue))
     opp_queue = mp.Queue()
-    opp_p = mp.Process(target=model_executor, args=(opp_adv_net, batch_size, n_samples,
+    opp_p = mp.Process(target=model_executor, args=(opp_adv_net, batch_size * 2, n_samples * 2,
                                                     opp_main, opp_worker_send_conns, opp_queue))
+
+    if has_next:
+        pro_next_v_net.share_memory()
+        pro_next_queue = mp.Queue()
+        pro_next_p = mp.Process(target=model_executor, args=(pro_next_v_net, batch_size, n_samples,
+                                                             pro_main, pro_worker_send_conns, pro_queue))
+        pro_next_p.start()
+
+        opp_next_v_net.share_memory()
+        opp_next_queue = mp.Queue()
+        opp_next_p = mp.Process(target=model_executor, args=(opp_next_v_net, batch_size, n_samples,
+                                                             opp_main, opp_worker_send_conns, opp_queue))
+        opp_next_p.start()
+    else:
+        pro_next_queue = None
+        opp_next_queue = None
 
     pro_p.start()
     opp_p.start()
@@ -637,7 +709,9 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
     ps = []
     for i in range(concurrency):
         p = mp.Process(target=_sample, args=(i, env, n, worker_main_conns[i], pro_queue,
-                                             pro_worker_recv_conns[i], opp_queue, opp_worker_recv_conns[i]))
+                                             pro_worker_recv_conns[i], opp_queue, opp_worker_recv_conns[i],
+                                             pro_next_queue, next_pro_worker_recv_conns[i],
+                                             opp_next_queue, next_opp_worker_recv_conns[i]))
         p.start()
         ps.append(p)
 
@@ -661,6 +735,10 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
 
     pro_p.join()
     opp_p.join()
+
+    if has_next:
+        pro_next_p.join()
+        opp_next_p.join()
 
     # cur_i = 0
     # while cur_i < n_samples:
@@ -813,25 +891,33 @@ def buffer_add(buffer, other_buffer, size, tot):
         _buffer_add(buffer, (other_buffer["input"][i], other_buffer["action"][i], other_buffer["reward"][i]), size, tot)
 
 
-def cfr(env):
-    gpu = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    cpu = torch.device("cpu")
-    device = cpu
+def cfr(env, n_round):
+    if not os.path.exists("models/{}".format(n_round)):
+        os.mkdir("models/{}".format(n_round))
+    # device = cpu
     # print(device)
     hidden_dim = 32
     pro_input_n = 8
     opp_input_n = 10
-    pro_v_net = ValueNet(pro_input_n, hidden_dim, 1).to(device)
-    pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6).to(device)
-    opp_v_net = ValueNet(opp_input_n, hidden_dim, 1).to(device)
-    opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4).to(device)
+    pro_v_net = ValueNet(pro_input_n, hidden_dim, 1)
+    pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6)
+    opp_v_net = ValueNet(opp_input_n, hidden_dim, 1)
+    opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4)
+
+    pro_next_v_net = None
+    opp_next_v_net = None
+    if n_round > 1:
+        pro_next_v_net = ValueNet(pro_input_n, hidden_dim, 1)
+        opp_next_v_net = ValueNet(opp_input_n, hidden_dim, 1)
+        pro_next_v_net.load_state_dict(torch.load("models/{}/pro_v.net".format(n_round - 1)))
+        opp_next_v_net.load_state_dict(torch.load("models/{}/opp_v.net".format(n_round - 1)))
 
     # print(pro_v_net(ts(np.random.randn(6)).to(device)))
 
     pro_adv_net.zero_()
     opp_adv_net.zero_()
 
-    n_iter = 1
+    n_iter = 40
     batch_size = 5000
     n_batches = 20
     lr = 5e-2
@@ -839,15 +925,19 @@ def cfr(env):
     n_passes = 50
     test_points = [(0.3, 3.5, 3.5, 3.5, 2.5), (0.3, 3.5, 3.5, 3.5, 0.5), (0.4, 3.5, 3.5, 3.5, 2.5)]
     load = True
+    train = False
     save = True
+    n_train = batch_size * n_batches
+    n_test = int(n_train * 0.1)
+    n_samples = n_train + n_test
 
     pro_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
     opp_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
 
     def display(p, ox, oy, px, py):
-        pro_input = ts(_extend_input([p, ox, oy, px, py], False)).to(device)
-        opp_input_0 = ts(_extend_input([0., p, ox, oy, px, py], True)).to(device)
-        opp_input_1 = ts(_extend_input([1., p, ox, oy, px, py], True)).to(device)
+        pro_input = ts(_extend_input([p, ox, oy, px, py], False))
+        opp_input_0 = ts(_extend_input([0., p, ox, oy, px, py], True))
+        opp_input_1 = ts(_extend_input([1., p, ox, oy, px, py], True))
         print("pro_v:", pro_v_net(pro_input)[0].item())
         print("opp_v:", opp_v_net(opp_input_0)[0].item(),
               opp_v_net(opp_input_1)[0].item())
@@ -858,81 +948,92 @@ def cfr(env):
     for p in test_points:
         display(*p)
 
+    pro_adv_nets = []
+    opp_adv_nets = []
+    
+    def train_v_from_buffer(pro_buffer, opp_buffer, pro_net, opp_net):
+        extend_input(pro_buffer, False)
+        extend_input(opp_buffer, True)
+
+        pro_net.reinitialize()
+        opp_net.reinitialize()
+
+        pro_df = pd.DataFrame(pro_buffer)
+        opp_df = pd.DataFrame(opp_buffer)
+
+        pro_df.sample(frac=1).reset_index(drop=True)  # shuffle
+        opp_df.sample(frac=1).reset_index(drop=True)  # shuffle
+
+        _train_net = partial(train_v_net, n_batches, batch_size, lr)
+        print("Training pro_net")
+        _train_net(pro_net, pro_df, verbose, True, n_passes)
+        print("Training opp_net")
+        _train_net(opp_net, opp_df, verbose, True, n_passes)
+
     for it in range(n_iter):
         print("Iteration #", it)
+        
+        if train:
+            if load:
+                pro_v_buffer = load_buffer("models/{}/pro_v_buffer_{}.obj".format(n_round, it))
+                # print(type(pro_v_buffer["input"]))
+                opp_v_buffer = load_buffer("models/{}/opp_v_buffer_{}.obj".format(n_round, it))
+            else:
+                pro_v_buffer = dict(input=[], action=[], reward=[])
+                opp_v_buffer = dict(input=[], action=[], reward=[])
+    
+            pro_adv_buffer = dict(input=[], action=[], reward=[])
+            opp_adv_buffer = dict(input=[], action=[], reward=[])
 
-        if load:
-            pro_v_buffer = load_buffer("models/pro_v_buffer_{}.obj".format(it))
-            # print(type(pro_v_buffer["input"]))
-            opp_v_buffer = load_buffer("models/opp_v_buffer_{}.obj".format(it))
+            sample(env, n_samples - len(pro_v_buffer["input"]), pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer,
+                   pro_next_v_net, opp_next_v_net)
+    
+            # for i in range(100):
+            #     print(pro_v_buffer["input"][i], pro_v_buffer["action"][i], pro_v_buffer["reward"][i])
+    
+            if save:
+                save_buffer(pro_v_buffer, "models/{}/pro_v_buffer_{}.obj".format(n_round, it))
+                save_buffer(opp_v_buffer, "models/{}/opp_v_buffer_{}.obj".format(n_round, it))
+    
+            st = time.time()
+
+            train_v_from_buffer(pro_v_buffer, opp_v_buffer, pro_v_net, opp_v_net)
+    
+            _train_adv_net = partial(train_adv_net, n_batches, batch_size, lr)
+            buffer_add(pro_adv_buffer, gen_adv_data(pro_v_buffer, pro_v_net), n_samples, (it + 1) * n_samples)
+            pro_adv_df = pd.DataFrame(pro_adv_buffer)
+            # print(pro_adv_df.shape)
+            # pro_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
+            print("Training pro_adv_net")
+            _train_adv_net(pro_adv_net, pro_adv_df, verbose, True, n_passes)
+    
+            # while True:
+            #     display(0.1, 3.5, 3.5, 3.5, 3.5)
+            #     prompt = input()
+            #     if prompt == "cont":
+            #         break
+            #     _train_adv_net(pro_adv_net, pro_adv_df, verbose, False)
+    
+            buffer_add(opp_adv_buffer, gen_adv_data(opp_v_buffer, opp_v_net), n_samples, (it + 1) * n_samples)
+            opp_adv_df = pd.DataFrame(opp_adv_buffer)
+            # opp_adv_df = opp_adv_df.append(gen_adv_data(opp_v_df, opp_v_net), ignore_index=True)
+            # opp_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
+            print("Training opp_adv_net")
+            _train_adv_net(opp_adv_net, opp_adv_df, verbose, True, n_passes)
+    
+            if save:
+                save_buffer(pro_adv_buffer, "models/{}/pro_adv_buffer_{}.obj".format(n_round, it))
+                save_buffer(opp_adv_buffer, "models/{}/opp_adv_buffer_{}.obj".format(n_round, it))
+                
+            torch.save(pro_v_net.state_dict(), "models/{}/pro_v_{}.net".format(n_round, it))
+            torch.save(pro_adv_net.state_dict(), "models/{}/pro_adv_{}.net".format(n_round, it))
+            torch.save(opp_v_net.state_dict(), "models/{}/opp_v_{}.net".format(n_round, it))
+            torch.save(opp_adv_net.state_dict(), "models/{}/opp_adv_{}.net".format(n_round, it))
+    
+            print("Time: {}s".format(time.time() - st))
         else:
-            pro_v_buffer = dict(input=[], action=[], reward=[])
-            opp_v_buffer = dict(input=[], action=[], reward=[])
-
-        pro_adv_buffer = dict(input=[], action=[], reward=[])
-        opp_adv_buffer = dict(input=[], action=[], reward=[])
-
-        n_train = batch_size * n_batches
-        n_test = int(n_train * 0.1)
-        n_samples = n_train + n_test
-
-        sample(env, n_samples - len(pro_v_buffer["input"]), pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer)
-
-        # for i in range(100):
-        #     print(pro_v_buffer["input"][i], pro_v_buffer["action"][i], pro_v_buffer["reward"][i])
-
-        if save:
-            save_buffer(pro_v_buffer, "models/pro_v_buffer_{}.obj".format(it))
-            save_buffer(opp_v_buffer, "models/opp_v_buffer_{}.obj".format(it))
-
-        extend_input(pro_v_buffer, False)
-        extend_input(opp_v_buffer, True)
-
-        pro_v_net.reinitialize()
-        opp_v_net.reinitialize()
-
-        pro_v_df = pd.DataFrame(pro_v_buffer)
-        opp_v_df = pd.DataFrame(opp_v_buffer)
-
-        pro_v_df.sample(frac=1).reset_index(drop=True)  # shuffle
-        opp_v_df.sample(frac=1).reset_index(drop=True)  # shuffle
-
-        st = time.time()
-
-        _train_v_net = partial(train_v_net, n_batches, batch_size, lr)
-        print("Training pro_v_net")
-        _train_v_net(pro_v_net, pro_v_df, verbose, True, n_passes)
-        print("Training opp_v_net")
-        _train_v_net(opp_v_net, opp_v_df, verbose, True, n_passes)
-
-        _train_adv_net = partial(train_adv_net, n_batches, batch_size, lr)
-        buffer_add(pro_adv_buffer, gen_adv_data(pro_v_buffer, pro_v_net), n_samples, (it + 1) * n_samples)
-        pro_adv_df = pd.DataFrame(pro_adv_buffer)
-        # print(pro_adv_df.shape)
-        # pro_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
-        print("Training pro_adv_net")
-        _train_adv_net(pro_adv_net, pro_adv_df, verbose, True, n_passes)
-
-        # while True:
-        #     display(0.1, 3.5, 3.5, 3.5, 3.5)
-        #     prompt = input()
-        #     if prompt == "cont":
-        #         break
-        #     _train_adv_net(pro_adv_net, pro_adv_df, verbose, False)
-
-        buffer_add(opp_adv_buffer, gen_adv_data(opp_v_buffer, opp_v_net), n_samples, (it + 1) * n_samples)
-        opp_adv_df = pd.DataFrame(opp_adv_buffer)
-        # opp_adv_df = opp_adv_df.append(gen_adv_data(opp_v_df, opp_v_net), ignore_index=True)
-        # opp_adv_df.sample(frac=1).reset_index(drop=True)  # shuffle
-        print("Training opp_adv_net")
-        _train_adv_net(opp_adv_net, opp_adv_df, verbose, True, n_passes)
-
-        if save:
-            save_buffer(pro_adv_buffer, "models/pro_adv_buffer_{}.obj".format(it))
-            save_buffer(opp_adv_buffer, "models/opp_adv_buffer_{}.obj".format(it))
-
-
-        print("Time: {}s".format(time.time() - st))
+            pro_adv_net.load_state_dict(torch.load("models/{}/pro_adv_{}.net".format(n_round, it)))
+            opp_adv_net.load_state_dict(torch.load("models/{}/opp_adv_{}.net".format(n_round, it)))
 
         # if save:
         #     pro_adv_df.to_pickle("models/pro_adv_df_{}.obj".format(it))
@@ -941,20 +1042,30 @@ def cfr(env):
         for p in test_points:
             display(*p)
 
-        torch.save(pro_v_net.state_dict(), "models/pro_v_{}.net".format(it))
-        torch.save(pro_adv_net.state_dict(), "models/pro_adv_{}.net".format(it))
-        torch.save(opp_v_net.state_dict(), "models/opp_v_{}.net".format(it))
-        torch.save(opp_adv_net.state_dict(), "models/opp_adv_{}.net".format(it))
+        _pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6)
+        _pro_adv_net.load_state_dict(pro_adv_net.state_dict())
+        _opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4)
+        _opp_adv_net.load_state_dict(opp_adv_net.state_dict())
+        pro_adv_nets.append(_pro_adv_net)
+        opp_adv_nets.append(_opp_adv_net)
 
-    while True:
-        x = input()
-        if x == "cont":
-            break
-        try:
-            p, ox, oy, px, py = map(float, x.split())
-            display(p, ox, oy, px, py)
-        except ValueError:
-            continue
+    pro_v_buffer = dict(input=[], action=[], reward=[])
+    opp_v_buffer = dict(input=[], action=[], reward=[])
+    sample(env, n_samples, pro_adv_nets, opp_adv_nets, pro_v_buffer, opp_v_buffer, pro_next_v_net, opp_next_v_net)
+    train_v_from_buffer(pro_v_buffer, opp_v_buffer, pro_v_net, opp_v_net)
+
+    torch.save(pro_v_net.state_dict(), "models/{}/pro_v.net".format(n_round))
+    torch.save(opp_v_net.state_dict(), "models/{}/opp_v.net".format(n_round))
+
+    # while True:
+    #     x = input()
+    #     if x == "cont":
+    #         break
+    #     try:
+    #         p, ox, oy, px, py = map(float, x.split())
+    #         display(p, ox, oy, px, py)
+    #     except ValueError:
+    #         continue
 
 
 def main():
@@ -962,7 +1073,7 @@ def main():
     env = TaggingGame(8)
     # reader = ApproximatedReader("tagging-8_cfr")
     # reader = None
-    cfr(env)
+    cfr(env, 1)
     # run(env, 11, 1000, reader)
     # interactive(env, 1000, reader)
     # plot(env, 0.1, 2000, 100)

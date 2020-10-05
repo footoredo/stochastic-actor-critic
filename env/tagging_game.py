@@ -37,7 +37,7 @@ class TaggingGame(object):
 
         if pro_action == 4:  # tag
             pro_reward -= 0.2
-            if calc_dis(pro_pos, opp_pos) < self.tag_lim:  # tag success
+            if calc_dis(pro_pos, opp_pos) < self.tag_lim and opp_pos[1] <= 4.:  # tag success
                 opp_reward -= 10.
                 if opp_type == 0:  # ally
                     pro_reward -= 20.
