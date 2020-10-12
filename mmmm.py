@@ -230,6 +230,7 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
     wsr = 0
     wss = 0
     for tt in range(n_iter):
+        # print(tt)
         atk_s = []
         for t in range(n_types):
             atk_s.append(get_s(atk_regret[t]))
@@ -281,6 +282,7 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
         wss += ws
 
         atk_u, atk_au, dfd_u, dfd_au = calc_u(atk_as, dfd_as)
+        # atk_u, atk_au, dfd_u, dfd_au = None, None, None, None
 
         atk_us.append(atk_au)
         dfd_us.append(dfd_au)
@@ -297,6 +299,8 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
 
     if plot:
         fig, ax = plt.subplots()
+        np.array(atk_ass).dump("exposing-cfr.atk_ass.data")
+        np.array(dfd_ass).dump("exposing-cfr.dfd_ass.data")
         df = pd.DataFrame(dict(it=list(range(n_iter)) * 3,
                                u=list(np.array(atk_ass)[:, 0, 0]) + list(np.array(atk_ass)[:, 1, 0]) + list(np.array(dfd_ass)[:, 0]),
                                name=["a0"] * n_iter + ["a1"] * n_iter + ["d"] * n_iter))
@@ -448,6 +452,8 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
                analyse_wave(list(np.array(dcs)[start:, 0]))
 
     if plot:
+        # np.array(aas).dump("exposing-pg-dt.atk_ass.data")
+        # np.array(das).dump("exposing-pg-dt.dfd_ass.data")
         # analyse_wave(list(np.array(acs)[:, 1, 0]))
         # iteration = list(np.arange(n_iter)) * (n_types + 1)
         # value = list(np.array(aexs).reshape(-1)) + dexs
@@ -465,8 +471,8 @@ def run(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, dfd_vn
         #                        value=np.abs(np.array(aas)[:, 0, 0] - np.array(aas)[:, 1, 0]),
         #                        name=["diff"] * n_iter))
         df = pd.DataFrame(dict(iteration=list(np.arange(n_iter)) + list(np.arange(n_iter)) + list(np.arange(n_iter)),
-                               value=list(np.array(acs)[:, 0, 0]) + list(np.array(acs)[:, 1, 0]) + list(
-                                   np.array(dcs)[:, 0]),
+                               value=list(np.array(aas)[:, 0, 0]) + list(np.array(aas)[:, 1, 0]) + list(
+                                   np.array(das)[:, 0]),
                                name=["a0"] * n_iter + ["a1"] * n_iter + ["d"] * n_iter))
         # df = pd.DataFrame(dict(iteration=list(range(4000, n_iter)),
         #                        value=list(np.array(dcs)[4000:, 0]),
@@ -781,8 +787,12 @@ def main():
         _interp = ["nn", "linear_fast"] if args.two_nets else "linear_fast"
         _atk_vn = load_vn(_name.format("atk_vn"), _interp)
         _dfd_vn = load_vn(_name.format("dfd_vn"), _interp)
-        _atk_sn = load_vn(_name.format("atk_sn"), _interp)
-        _dfd_sn = load_vn(_name.format("dfd_sn"), _interp)
+        try:
+            _atk_sn = load_vn(_name.format("atk_sn"), _interp)
+            _dfd_sn = load_vn(_name.format("dfd_sn"), _interp)
+        except FileNotFoundError:
+            _atk_sn = None
+            _dfd_sn = None
         return _atk_vn, _dfd_vn, _atk_sn, _dfd_sn
 
     if args.n_rounds > 1 and not args.build:

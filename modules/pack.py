@@ -171,13 +171,13 @@ class NNPack(nn.Module):
         sv = 0.
         sw = 0.
         for i in range(self.n):
-            # dis = torch.abs(x - self.xs[i])
-            # w = ts(1.) / (dis * dis).clamp(min=eps)
-            dis = torch.abs(x - self.xs[i]) - 0.1
-            if dis <= 0:
-                w = 1. / eps * (1. - dis / (eps / 1e-2))
-            else:
-                w = 1. / (eps + dis * dis)
+            dis = torch.abs(x - self.xs[i])
+            w = ts(1.) / (dis * dis).clamp(min=eps)
+            # dis = torch.abs(x - self.xs[i]) - 0.1
+            # if dis <= 0:
+            #     w = 1. / eps * (1. - dis / (eps / 1e-2))
+            # else:
+            #     w = 1. / (eps + dis * dis)
 
             # dis = dis.clamp(min=eps)
             # dis = torch.abs(x - self.xs[i])

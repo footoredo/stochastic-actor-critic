@@ -44,7 +44,7 @@ def _load_vn(interp, data, verbose):
 
 
 def load_vn(filename, interp="linear_fast", verbose=False):
-    print("loading {}".format(filename))
+    print("loading {}".format(filename), interp)
     data = np.load(filename)
     if type(interp) == str:
         return _load_vn(interp, data, verbose)

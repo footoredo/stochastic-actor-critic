@@ -382,32 +382,62 @@ def train_net(env, n_samples, n_iter):
 
 
 class ValueNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, is_opp):
         super(ValueNet, self).__init__()
 
-        self.linear1 = nn.Linear(input_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, output_dim)
+        if is_opp:
+            self.linear1 = nn.ModuleList([nn.Linear(input_dim - 1, hidden_dim), nn.Linear(input_dim - 1, hidden_dim)])
+            self.linear2 = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim), nn.Linear(hidden_dim, hidden_dim)])
+            self.linear3 = nn.ModuleList([nn.Linear(hidden_dim, output_dim), nn.Linear(hidden_dim, output_dim)])
+        else:
+            self.linear1 = nn.Linear(input_dim, hidden_dim)
+            self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+            self.linear3 = nn.Linear(hidden_dim, output_dim)
+
+        self.is_opp = is_opp
 
     def forward(self, _input):
-        x = self.linear1(_input)
-        x = self.linear2(torch.tanh(x))
-        x = self.linear3(torch.tanh(x))
+        if not self.is_opp:
+            x = self.linear1(_input)
+            x = self.linear2(torch.tanh(x))
+            x = self.linear3(torch.tanh(x))
+        else:
+            w1 = _input[:, 0:1]
+            w0 = 1. - w1
+            _input = _input[:, 1:]
+            x = w0 * self.linear1[0](_input) + w1 * self.linear1[1](_input)
+            x = w0 * self.linear2[0](x) + w1 * self.linear2[1](x)
+            x = w0 * self.linear3[0](x) + w1 * self.linear3[1](x)
         return x
 
     def reinitialize(self):
-        self.linear1.reset_parameters()
-        self.linear2.reset_parameters()
-        self.linear3.reset_parameters()
+        if self.is_opp:
+            for i in range(2):
+                self.linear1[i].reset_parameters()
+                self.linear2[i].reset_parameters()
+                self.linear3[i].reset_parameters()
+        else:
+            self.linear1.reset_parameters()
+            self.linear2.reset_parameters()
+            self.linear3.reset_parameters()
 
     def zero_(self):
         with torch.no_grad():
-            self.linear1.weight.zero_()
-            self.linear1.bias.zero_()
-            self.linear2.weight.zero_()
-            self.linear2.bias.zero_()
-            self.linear3.weight.zero_()
-            self.linear3.bias.zero_()
+            if self.is_opp:
+                for i in range(2):
+                    self.linear1[i].weight.zero_()
+                    self.linear1[i].bias.zero_()
+                    self.linear2[i].weight.zero_()
+                    self.linear2[i].bias.zero_()
+                    self.linear3[i].weight.zero_()
+                    self.linear3[i].bias.zero_()
+            else:
+                self.linear1.weight.zero_()
+                self.linear1.bias.zero_()
+                self.linear2.weight.zero_()
+                self.linear2.bias.zero_()
+                self.linear3.weight.zero_()
+                self.linear3.bias.zero_()
 
 
 def act_on_adv(adv, rng=None):
@@ -421,6 +451,17 @@ def act_on_adv(adv, rng=None):
     else:
         s = np.maximum(adv, 0.)
         return rng.choice(range(s.shape[0]), p=s / s.sum())
+
+
+def get_strategy(adv):
+    if np.sum(np.abs(adv)) < 1e-5:
+        adv = np.ones_like(adv)
+    if np.max(adv) <= 0.:
+        a = np.argmax(adv)
+        adv = np.zeros_like(adv)
+        adv[a] = 1.
+    s = np.maximum(adv, 0.)
+    return s / s.sum()
 
 
 def train_v_net(n_batches, batch_size, lr, v_net: ValueNet, data: pd.DataFrame, verbose=False, reinit=True, n_passes=3,
@@ -502,7 +543,7 @@ def train_adv_net(n_batches, batch_size, lr, adv_net: ValueNet, data: pd.DataFra
             adv_optimizer.step()
 
 
-def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_queue):
+def model_executor(net, batch_size, total_jobs, worker_conns, job_queue):
     rng = np.random.RandomState()
     remain_jobs = total_jobs
     while remain_jobs > 0:
@@ -559,12 +600,15 @@ def model_executor(net, batch_size, total_jobs, main_conn, worker_conns, job_que
 #         main_conn.send((pro_input, pro_action, pro_r, opp_input, opp_action, opp_r))
 
 
-def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn, pro_next_queue, pro_next_conn,
+def _sample(_id, env, _p, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn, pro_next_queue, pro_next_conn,
             opp_next_queue, opp_next_conn):
     rng = np.random.RandomState()
     for i in range(n):
-        # p = [0.3]
-        p = np.random.rand(1)
+        # print(_p)
+        if _p is not None:
+            p = [_p / 10]
+        else:
+            p = np.random.rand(1)
         opp_pos = rng.randint(env.size, size=2) + 0.5
         pro_pos = rng.randint(env.size, size=2) % np.array([env.size, env.size // 2]) + 0.5
         # opp_pos = np.random.rand(2) * np.array([env.size, env.size])
@@ -585,14 +629,17 @@ def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn, pr
         opp_queue.put((_id, extended_opp_other_input))
 
         pro_action = act_on_adv(pro_conn.recv(), rng)
-        opp_strategy = opp_conn.recv()
-        opp_other_strategy = opp_conn.recv()
-        opp_action = act_on_adv(opp_strategy, rng)
+        opp_adv = opp_conn.recv()
+        opp_other_adv = opp_conn.recv()
+        opp_strategy = get_strategy(opp_adv)
+        opp_other_strategy = get_strategy(opp_other_adv)
+        opp_action = act_on_adv(opp_adv, rng)
 
         s = [0., 0.]
         s[opp_type] = opp_strategy[opp_action]
         s[opp_other_type] = opp_other_strategy[opp_action]
-        new_p = (p * s[0]) / (p * s[0] + (1 - p) * s[1])
+        # print((p * s[0] + (1 - p) * s[1]), p, s)
+        new_p = [(p[0] * s[0]) / (p[0] * s[0] + (1 - p[0]) * s[1])]
 
         # print(p, s, new_p)
 
@@ -608,15 +655,17 @@ def _sample(_id, env, n, main_conn, pro_queue, pro_conn, opp_queue, opp_conn, pr
             pro_next_queue.put((_id, new_extended_pro_input))
             opp_next_queue.put((_id, new_extended_opp_input))
 
-            pro_r += pro_next_conn.recv()
-            opp_r += opp_next_conn.recv()
+            pro_r += pro_next_conn.recv()[0]
+            opp_r += opp_next_conn.recv()[0]
 
+        # pro_r = np.array(pro_r, dtype=np.float)
+        # opp_r = np.array(opp_r, dtype=np.float)
         # print(pro_input, pro_action, pro_r, opp_input, opp_action, opp_r)
 
         main_conn.send((pro_input, pro_action, pro_r, opp_input, opp_action, opp_r))
 
 
-def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer, pro_next_v_net, opp_next_v_net):
+def sample(env, _p, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer, pro_next_v_net, opp_next_v_net):
     has_next = pro_next_v_net is not None
     if n_samples == 0:
         return
@@ -677,27 +726,24 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer,
         worker_main_conns.append(conn2)
         worker_locks.append(mp.Lock())
 
-    main_pro, pro_main = mp.Pipe()
-    main_opp, opp_main = mp.Pipe()
-
     pro_queue = mp.Queue()
     pro_p = mp.Process(target=model_executor, args=(pro_adv_net, batch_size, n_samples,
-                                                    pro_main, pro_worker_send_conns, pro_queue))
+                                                    pro_worker_send_conns, pro_queue))
     opp_queue = mp.Queue()
     opp_p = mp.Process(target=model_executor, args=(opp_adv_net, batch_size * 2, n_samples * 2,
-                                                    opp_main, opp_worker_send_conns, opp_queue))
+                                                    opp_worker_send_conns, opp_queue))
 
     if has_next:
         pro_next_v_net.share_memory()
         pro_next_queue = mp.Queue()
         pro_next_p = mp.Process(target=model_executor, args=(pro_next_v_net, batch_size, n_samples,
-                                                             pro_main, pro_worker_send_conns, pro_queue))
+                                                             next_pro_worker_send_conns, pro_next_queue))
         pro_next_p.start()
 
         opp_next_v_net.share_memory()
         opp_next_queue = mp.Queue()
         opp_next_p = mp.Process(target=model_executor, args=(opp_next_v_net, batch_size, n_samples,
-                                                             opp_main, opp_worker_send_conns, opp_queue))
+                                                             next_opp_worker_send_conns, opp_next_queue))
         opp_next_p.start()
     else:
         pro_next_queue = None
@@ -708,7 +754,7 @@ def sample(env, n_samples, pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer,
 
     ps = []
     for i in range(concurrency):
-        p = mp.Process(target=_sample, args=(i, env, n, worker_main_conns[i], pro_queue,
+        p = mp.Process(target=_sample, args=(i, env, _p, n, worker_main_conns[i], pro_queue,
                                              pro_worker_recv_conns[i], opp_queue, opp_worker_recv_conns[i],
                                              pro_next_queue, next_pro_worker_recv_conns[i],
                                              opp_next_queue, next_opp_worker_recv_conns[i]))
@@ -891,26 +937,30 @@ def buffer_add(buffer, other_buffer, size, tot):
         _buffer_add(buffer, (other_buffer["input"][i], other_buffer["action"][i], other_buffer["reward"][i]), size, tot)
 
 
-def cfr(env, n_round):
-    if not os.path.exists("models/{}".format(n_round)):
-        os.mkdir("models/{}".format(n_round))
+def cfr(env, n_round, _p):
+    save_dir = "models/{}".format(n_round)
+    if not os.path.exists(save_dir):
+        os.mkdir(save_dir)
+    save_dir = save_dir + "/{}".format(_p)
+    if not os.path.exists(save_dir):
+        os.mkdir(save_dir)
     # device = cpu
     # print(device)
     hidden_dim = 32
     pro_input_n = 8
     opp_input_n = 10
-    pro_v_net = ValueNet(pro_input_n, hidden_dim, 1)
-    pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6)
-    opp_v_net = ValueNet(opp_input_n, hidden_dim, 1)
-    opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4)
+    pro_v_net = ValueNet(pro_input_n, hidden_dim, 1, False)
+    pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6, False)
+    opp_v_net = ValueNet(opp_input_n, hidden_dim, 1, True)
+    opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4, True)
 
     pro_next_v_net = None
     opp_next_v_net = None
     if n_round > 1:
-        pro_next_v_net = ValueNet(pro_input_n, hidden_dim, 1)
-        opp_next_v_net = ValueNet(opp_input_n, hidden_dim, 1)
-        pro_next_v_net.load_state_dict(torch.load("models/{}/pro_v.net".format(n_round - 1)))
-        opp_next_v_net.load_state_dict(torch.load("models/{}/opp_v.net".format(n_round - 1)))
+        pro_next_v_net = ValueNet(pro_input_n, hidden_dim, 1, False)
+        opp_next_v_net = ValueNet(opp_input_n, hidden_dim, 1, True)
+        pro_next_v_net.load_state_dict(torch.load("models/{}/{}".format(n_round - 1, _p) + "/pro_v.net"))
+        opp_next_v_net.load_state_dict(torch.load("models/{}/{}".format(n_round - 1, _p) + "/opp_v.net"))
 
     # print(pro_v_net(ts(np.random.randn(6)).to(device)))
 
@@ -923,9 +973,9 @@ def cfr(env, n_round):
     lr = 5e-2
     verbose = False
     n_passes = 50
-    test_points = [(0.3, 3.5, 3.5, 3.5, 2.5), (0.3, 3.5, 3.5, 3.5, 0.5), (0.4, 3.5, 3.5, 3.5, 2.5)]
-    load = True
-    train = False
+    test_points = [(0.3, 3.5, 2.5, 3.5, 2.5), (0.3, 3.5, 3.5, 3.5, 0.5)]
+    load = False
+    train = True
     save = True
     n_train = batch_size * n_batches
     n_test = int(n_train * 0.1)
@@ -935,12 +985,12 @@ def cfr(env, n_round):
     opp_adv_df = pd.DataFrame(dict(input=[], action=[], reward=[]))
 
     def display(p, ox, oy, px, py):
-        pro_input = ts(_extend_input([p, ox, oy, px, py], False))
-        opp_input_0 = ts(_extend_input([0., p, ox, oy, px, py], True))
-        opp_input_1 = ts(_extend_input([1., p, ox, oy, px, py], True))
-        print("pro_v:", pro_v_net(pro_input)[0].item())
-        print("opp_v:", opp_v_net(opp_input_0)[0].item(),
-              opp_v_net(opp_input_1)[0].item())
+        pro_input = ts([_extend_input([p, ox, oy, px, py], False)])
+        opp_input_0 = ts([_extend_input([0., p, ox, oy, px, py], True)])
+        opp_input_1 = ts([_extend_input([1., p, ox, oy, px, py], True)])
+        print("pro_v:", pro_v_net(pro_input)[0][0].item())
+        print("opp_v:", opp_v_net(opp_input_0)[0][0].item(),
+              opp_v_net(opp_input_1)[0][0].item())
         print("pro_adv:", pro_adv_net(pro_input).detach().numpy())
         print("opp_adv:", opp_adv_net(opp_input_0).detach().numpy(),
               opp_adv_net(opp_input_1).detach().numpy())
@@ -975,9 +1025,9 @@ def cfr(env, n_round):
         
         if train:
             if load:
-                pro_v_buffer = load_buffer("models/{}/pro_v_buffer_{}.obj".format(n_round, it))
+                pro_v_buffer = load_buffer(save_dir + "/pro_v_buffer_{}.obj".format(it))
                 # print(type(pro_v_buffer["input"]))
-                opp_v_buffer = load_buffer("models/{}/opp_v_buffer_{}.obj".format(n_round, it))
+                opp_v_buffer = load_buffer(save_dir + "/opp_v_buffer_{}.obj".format(it))
             else:
                 pro_v_buffer = dict(input=[], action=[], reward=[])
                 opp_v_buffer = dict(input=[], action=[], reward=[])
@@ -985,15 +1035,15 @@ def cfr(env, n_round):
             pro_adv_buffer = dict(input=[], action=[], reward=[])
             opp_adv_buffer = dict(input=[], action=[], reward=[])
 
-            sample(env, n_samples - len(pro_v_buffer["input"]), pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer,
+            sample(env, _p, n_samples - len(pro_v_buffer["input"]), pro_adv_net, opp_adv_net, pro_v_buffer, opp_v_buffer,
                    pro_next_v_net, opp_next_v_net)
     
             # for i in range(100):
             #     print(pro_v_buffer["input"][i], pro_v_buffer["action"][i], pro_v_buffer["reward"][i])
     
             if save:
-                save_buffer(pro_v_buffer, "models/{}/pro_v_buffer_{}.obj".format(n_round, it))
-                save_buffer(opp_v_buffer, "models/{}/opp_v_buffer_{}.obj".format(n_round, it))
+                save_buffer(pro_v_buffer, save_dir + "/pro_v_buffer_{}.obj".format(it))
+                save_buffer(opp_v_buffer, save_dir + "/opp_v_buffer_{}.obj".format(it))
     
             st = time.time()
 
@@ -1022,18 +1072,18 @@ def cfr(env, n_round):
             _train_adv_net(opp_adv_net, opp_adv_df, verbose, True, n_passes)
     
             if save:
-                save_buffer(pro_adv_buffer, "models/{}/pro_adv_buffer_{}.obj".format(n_round, it))
-                save_buffer(opp_adv_buffer, "models/{}/opp_adv_buffer_{}.obj".format(n_round, it))
+                save_buffer(pro_adv_buffer, save_dir + "/pro_adv_buffer_{}.obj".format(it))
+                save_buffer(opp_adv_buffer, save_dir + "/opp_adv_buffer_{}.obj".format(it))
                 
-            torch.save(pro_v_net.state_dict(), "models/{}/pro_v_{}.net".format(n_round, it))
-            torch.save(pro_adv_net.state_dict(), "models/{}/pro_adv_{}.net".format(n_round, it))
-            torch.save(opp_v_net.state_dict(), "models/{}/opp_v_{}.net".format(n_round, it))
-            torch.save(opp_adv_net.state_dict(), "models/{}/opp_adv_{}.net".format(n_round, it))
+            torch.save(pro_v_net.state_dict(), save_dir + "/pro_v_{}.net".format(it))
+            torch.save(pro_adv_net.state_dict(), save_dir + "/pro_adv_{}.net".format(it))
+            torch.save(opp_v_net.state_dict(), save_dir + "/opp_v_{}.net".format(it))
+            torch.save(opp_adv_net.state_dict(), save_dir + "/opp_adv_{}.net".format(it))
     
             print("Time: {}s".format(time.time() - st))
         else:
-            pro_adv_net.load_state_dict(torch.load("models/{}/pro_adv_{}.net".format(n_round, it)))
-            opp_adv_net.load_state_dict(torch.load("models/{}/opp_adv_{}.net".format(n_round, it)))
+            pro_adv_net.load_state_dict(torch.load(save_dir + "/pro_adv_{}.net".format(it)))
+            opp_adv_net.load_state_dict(torch.load(save_dir + "/opp_adv_{}.net".format(it)))
 
         # if save:
         #     pro_adv_df.to_pickle("models/pro_adv_df_{}.obj".format(it))
@@ -1042,20 +1092,20 @@ def cfr(env, n_round):
         for p in test_points:
             display(*p)
 
-        _pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6)
+        _pro_adv_net = ValueNet(pro_input_n, hidden_dim, 6, False)
         _pro_adv_net.load_state_dict(pro_adv_net.state_dict())
-        _opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4)
+        _opp_adv_net = ValueNet(opp_input_n, hidden_dim, 4, True)
         _opp_adv_net.load_state_dict(opp_adv_net.state_dict())
         pro_adv_nets.append(_pro_adv_net)
         opp_adv_nets.append(_opp_adv_net)
 
     pro_v_buffer = dict(input=[], action=[], reward=[])
     opp_v_buffer = dict(input=[], action=[], reward=[])
-    sample(env, n_samples, pro_adv_nets, opp_adv_nets, pro_v_buffer, opp_v_buffer, pro_next_v_net, opp_next_v_net)
+    sample(env, _p, n_samples, pro_adv_nets, opp_adv_nets, pro_v_buffer, opp_v_buffer, pro_next_v_net, opp_next_v_net)
     train_v_from_buffer(pro_v_buffer, opp_v_buffer, pro_v_net, opp_v_net)
 
-    torch.save(pro_v_net.state_dict(), "models/{}/pro_v.net".format(n_round))
-    torch.save(opp_v_net.state_dict(), "models/{}/opp_v.net".format(n_round))
+    torch.save(pro_v_net.state_dict(), save_dir + "/pro_v.net")
+    torch.save(opp_v_net.state_dict(), save_dir + "/opp_v.net")
 
     # while True:
     #     x = input()
@@ -1073,7 +1123,10 @@ def main():
     env = TaggingGame(8)
     # reader = ApproximatedReader("tagging-8_cfr")
     # reader = None
-    cfr(env, 1)
+    for i in range(1, 10):
+        cfr(env, i + 1, None)
+    # for p in range(11):
+    #     cfr(env, 1, p)
     # run(env, 11, 1000, reader)
     # interactive(env, 1000, reader)
     # plot(env, 0.1, 2000, 100)
