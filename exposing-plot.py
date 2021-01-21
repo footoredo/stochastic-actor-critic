@@ -113,9 +113,9 @@ def plot_curve_all():
 
     axes[0].set_ylabel("prob. of action 1")
 
-    axes[0].set_xlabel("TIPG")
-    axes[1].set_xlabel("TICFR\n#iterations")
-    axes[2].set_xlabel("TIPG$^-$")
+    axes[0].set_xlabel("TISP-PG")
+    axes[1].set_xlabel("TISP-CFR\n#iterations")
+    axes[2].set_xlabel("TISP-PG$^-$")
 
     axes[1].set_yticklabels([])
     axes[2].set_yticklabels([])

@@ -109,8 +109,59 @@ class Interp1dPack(nn.Module):
 
 
 class Interp1dPackFast(nn.Module):
-    def __init__(self, samples):
+    def __init__(self, samples, verbose=False):
         super(Interp1dPackFast, self).__init__()
+        self.n = n = len(samples)
+        xs = []
+        ys = []
+        for i in range(n):
+            xs.append(samples[i][0])
+            y = samples[i][1:]
+            if y.shape[0] == 1:
+                y = y[0]
+            ys.append(y)
+
+        self.xs = np.array(xs, dtype=np.float)
+        self.ys = np.array(ys, dtype=np.float)
+        if verbose:
+            for i in range(n):
+                print(xs[i], ys[i])
+        self.dis = 1. / (n - 1)
+        # print(xs, ys)
+        # print(self.cs(0.8))
+
+    def forward(self, b, eps=None):
+        x = b[0]
+        # xx = x.detach().item()
+        # ll = 0
+        # rr = self.n - 1
+        # while ll < rr - 1:
+        #     m = (ll + rr) // 2
+        #     if self.xs[m] <= x:
+        #         ll = m
+        #     else:
+        #         rr = m
+        # i = ll
+        i = min(self.n - 2, int(x.detach().item() / self.dis + 1e-5))
+        wa = x - ts(self.xs[i])
+        wb = ts(self.xs[i + 1]) - x
+        w = ts(self.xs[i + 1] - self.xs[i])
+        # print(self.ys[i], self.ys[i + 1])
+        return (wb / w * ts(self.ys[i]) + wa / w * ts(self.ys[i + 1])).detach()
+        # print("11111")
+        # if wa.item() < wb.item():
+        #     return ts(self.ys[i])
+        # else:
+        #     return ts(self.ys[i + 1])
+        # if np.random.rand() > (wa.item() / (wa.item())):
+        #     return ts(self.ys[i])
+        # else:
+        #     return ts(self.ys[i + 1])
+
+
+class BinaryPack(nn.Module):
+    def __init__(self, samples):
+        super(BinaryPack, self).__init__()
         self.n = n = len(samples)
         xs = []
         ys = []
@@ -144,8 +195,16 @@ class Interp1dPackFast(nn.Module):
         wb = ts(self.xs[i + 1]) - x
         w = ts(self.xs[i + 1] - self.xs[i])
         # print(self.ys[i], self.ys[i + 1])
-        return (wb / w * ts(self.ys[i]) + wa / w * ts(self.ys[i + 1])).detach()
-
+        # return (wb / w * ts(self.ys[i]) + wa / w * ts(self.ys[i + 1])).detach()
+        # print("11111")
+        if wa.item() < wb.item():
+            return ts(self.ys[i])
+        else:
+            return ts(self.ys[i + 1])
+        # if np.random.rand() > (wa.item() / (wa.item())):
+        #     return ts(self.ys[i])
+        # else:
+        #     return ts(self.ys[i + 1])
 
 class NNPack(nn.Module):
     def __init__(self, samples):

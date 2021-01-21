@@ -1,5 +1,5 @@
 from modules.pack import CubicSplinePack, Interp1dPack, Interp1dPackFast, Interp1dPackUltraFast, NNPack, \
-    DiscretePackFast
+    DiscretePackFast, BinaryPack
 from utils.utils import ts
 import numpy as np
 import seaborn as sns
@@ -26,6 +26,7 @@ def _load_vn(interp, data, verbose):
     interp_dict = {
         "linear": Interp1dPack,
         "linear_fast": Interp1dPackFast,
+        "binary": BinaryPack,
         "cubic": CubicSplinePack,
         "discrete": DiscretePackFast,
         "nn": NNPack

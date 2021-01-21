@@ -18,7 +18,7 @@ def update_belief(belief, prob):
 
 class SecurityGame(object):
     def __init__(self, n_slots, n_types, prior, n_rounds, beta=1.0, value_low=5., value_high=10., seed=None,
-                 random_prior=False):
+                 random_prior=False, zero_sum=False):
         self.rng = np.random.RandomState(seed=seed)
 
         self.n_slots = n_slots
@@ -42,12 +42,16 @@ class SecurityGame(object):
                 for j in range(n_slots):
                     if i == j:
                         self.payoff[t, i, j, 0] = atk_pen[t, i]
-                        # self.payoff[t, i, j, 1] = -atk_pen[t, i]
-                        self.payoff[t, i, j, 1] = dfd_rew[j]
+                        if zero_sum:
+                            self.payoff[t, i, j, 1] = -atk_pen[t, i]
+                        else:
+                            self.payoff[t, i, j, 1] = dfd_rew[j]
                     else:
                         self.payoff[t, i, j, 0] = atk_rew[t, i]
-                        # self.payoff[t, i, j, 1] = -atk_rew[t, i]
-                        self.payoff[t, i, j, 1] = dfd_pen[j]
+                        if zero_sum:
+                            self.payoff[t, i, j, 1] = -atk_rew[t, i]
+                        else:
+                            self.payoff[t, i, j, 1] = dfd_pen[j]
 
         # print(self.payoff)
         self.ob_len = [n_types * 2 + n_rounds, n_types + n_rounds]
@@ -291,10 +295,10 @@ class SecurityGame(object):
             #          np.sum(atk_pbne_eps * np.array(self.prior))], [def_eps, def_pbne_eps]]
 
     def get_def_payoff(self, atk_ac, def_ac, prob):
-        # ret = 0.
-        # for t in range(self.n_types):
-        #     ret += prob[t] * self.payoff[t, atk_ac, def_ac, 1]
-        ret = self.payoff[0, atk_ac, def_ac, 1]
+        ret = 0.
+        for t in range(self.n_types):
+            ret += prob[t] * self.payoff[t, atk_ac, def_ac, 1]
+        # ret = self.payoff[0, atk_ac, def_ac, 1]
         return ret
 
     def get_atk_payoff(self, t, atk_ac, def_ac):
@@ -530,6 +534,7 @@ class SecurityGame(object):
                         r = self._get_atk_payoff(t, atk_ac, def_ac) * k + tmp
                         utility += r * p_def * p_atk
                 self.cache[encoded] = utility
+                # print(history, t, k, utility)
                 return utility
 
         def run(self, attacker_strategy, defender_strategy, prior):

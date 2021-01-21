@@ -26,6 +26,7 @@ def get_parser(name):
     parser.add_argument('--n-iter', type=int, default=10000)
     parser.add_argument('--n-rounds', type=int, default=1)
     parser.add_argument('--ratio', type=float, default=1.0)
+    parser.add_argument('--zero-sum', action="store_true", default=False)
     parser.add_argument('--all', action="store_true", default=False)
     parser.add_argument('--save-data', action="store_true", default=False)
     parser.add_argument('--save-plot', action="store_true", default=False)
@@ -55,9 +56,10 @@ def regularize(a):
     return a / np.sum(a)
 
 
-def get_filename(args, n_rounds=None, n_iter=None):
+def get_filename(args, n_rounds=None, n_iter=None, n_samples=None):
     r = n_rounds if n_rounds is not None else args.n_rounds
     i = n_iter if n_iter is not None else args.n_iter
+    n = n_samples if n_samples is not None else args.n_samples
     if args.demo:
         name = "demo"
     # elif args.sep:
@@ -69,7 +71,8 @@ def get_filename(args, n_rounds=None, n_iter=None):
     if args.demo:
         filename = "{}-{}".format(name, r)
     else:
-        filename = "{}-{}-{}-{}-{}-{}-{}".format(name, args.env_seed, args.n_types, args.n_slots, args.n_types, r, i)
+        # filename = "{}-{}-{}-{}-{}-{}-{}-{}".format(name, args.env_seed, args.n_types, args.n_slots, args.n_types, r, i, n)
+        ilename = "{}-{}-{}-{}-{}-{}-{}".format(name, args.env_seed, args.n_types, args.n_slots, args.n_types, r, i)
     return filename
 
 

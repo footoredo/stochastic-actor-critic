@@ -203,32 +203,38 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
     atk_av_u = np.zeros(n_types)
     dfd_av_u = 0.
 
-    def calc_u(a_s, d_s):
-        atk_u = np.zeros((n_types, n_slots))
-        atk_au = np.zeros(n_types)
-        dfd_u = np.zeros(n_slots)
-        dfd_au = 0.
+    def calc_u(a_s, d_s, ab=None, verbose=False):
+        _atk_u = np.zeros((n_types, n_slots))
+        _atk_au = np.zeros(n_types)
+        _dfd_u = np.zeros(n_slots)
+        _dfd_au = 0.
 
         # print(a_s)
-        for t in range(n_types):
-            for a in range(n_slots):
-                new_belief = bayes(prior, a_s, a)
-                if any(np.isnan(new_belief)):
-                    new_belief = np.ones(n_types) / n_types
-                new_belief = ts(new_belief)
-                for b in range(n_slots):
-                    atk_r = payoff[t, a, b, 0] + (atk_vn(new_belief)[t] * ratio if atk_vn is not None else 0.)
+        for _t in range(n_types):
+            for _a in range(n_slots):
+                if ab is not None:
+                    new_belief = ts(ab[_a])
+                else:
+                    new_belief = bayes(prior, a_s, _a)
+                    if any(np.isnan(new_belief)):
+                        new_belief = np.ones(n_types) / n_types
+                    new_belief = ts(new_belief)
+                for _b in range(n_slots):
+                    atk_r = payoff[_t, _a, _b, 0] + (atk_vn(new_belief)[_t] * ratio if atk_vn is not None else 0.)
                     # print(dfd_vn(new_belief))
-                    dfd_r = payoff[t, a, b, 1] + (dfd_vn(new_belief) * ratio if dfd_vn is not None else 0.)
-                    atk_u[t, a] += atk_r * dfd_s[b]
-                    atk_au[t] += atk_r * a_s[t, a] * d_s[b]
+                    dfd_r = payoff[_t, _a, _b, 1] + (dfd_vn(new_belief) * ratio if dfd_vn is not None else 0.)
+                    if verbose:
+                        print(new_belief, _t, _a, _b, atk_r, dfd_r, payoff[_t, _a, _b], atk_vn(new_belief)[_t], dfd_vn(new_belief))
+                    _atk_u[_t, _a] += atk_r * d_s[_b]
+                    _atk_au[_t] += atk_r * a_s[_t, _a] * d_s[_b]
                     # print(dfd_r, prior[t], a_s[t, a])
-                    dfd_u[b] += dfd_r * prior[t] * a_s[t, a]
-                    dfd_au += dfd_r * prior[t] * a_s[t, a] * d_s[b]
-        return atk_u, atk_au, dfd_u, dfd_au
+                    _dfd_u[_b] += dfd_r * prior[_t] * a_s[_t, _a]
+                    _dfd_au += dfd_r * prior[_t] * a_s[_t, _a] * d_s[_b]
+        return _atk_u, _atk_au, _dfd_u, _dfd_au
 
     wsr = 0
     wss = 0
+    avg_belief = np.zeros((n_slots, n_types))
     for tt in range(n_iter):
         # print(tt)
         atk_s = []
@@ -236,6 +242,14 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
             atk_s.append(get_s(atk_regret[t]))
         atk_s = np.array(atk_s)
         dfd_s = get_s(dfd_regret)
+
+        for a in range(n_slots):
+            b = bayes(prior, atk_s, a)
+            if any(np.isnan(b)):
+                b = np.ones(n_types) / n_types
+            avg_belief[a] = (avg_belief[a] * tt + b) / (tt + 1)
+
+        # print(avg_belief)
 
         atk_u, atk_au, dfd_u, dfd_au = calc_u(atk_s, dfd_s)
 
@@ -281,7 +295,7 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
 
         wss += ws
 
-        atk_u, atk_au, dfd_u, dfd_au = calc_u(atk_as, dfd_as)
+        atk_u, atk_au, dfd_u, dfd_au = calc_u(atk_as, dfd_as, verbose=False and (tt + 1) % 1000 == 0)
         # atk_u, atk_au, dfd_u, dfd_au = None, None, None, None
 
         atk_us.append(atk_au)
@@ -293,9 +307,10 @@ def run_cfr(n_slots, n_types, prior, payoff, n_iter, plot=False, atk_vn=None, df
         # atk_es.append(atk_e)
         # dfd_es.append(dfd_e)
 
-        # if tt % 100 == 0:
-            # print(atk_u, atk_au, dfd_u, dfd_au)
-            # print(atk_regret, dfd_regret)
+        # if (tt+1) % 1000 == 0:
+        #     print(atk_as, dfd_as)
+        #     print(atk_u, atk_au, dfd_u, dfd_au)
+        #     print(atk_regret, dfd_regret)
 
     if plot:
         fig, ax = plt.subplots()
@@ -780,16 +795,17 @@ def main():
     else:
         prior = None if args.prior is None else np.array(args.prior)
         env = SecurityGame(n_slots=args.n_slots, n_types=args.n_types, prior=prior,
-                           n_rounds=args.n_rounds, seed=args.env_seed, random_prior=False)
+                           n_rounds=args.n_rounds, seed=args.env_seed, random_prior=False,
+                           zero_sum=args.zero_sum)
 
     def _load_vn(_round):
-        _name = "data/" + get_filename(args, n_rounds=_round, n_iter=args.load_n_iter or args.n_iter) + ".{}.obj"
+        _name = "data/" + get_filename(args, n_rounds=_round, n_iter=args.load_n_iter or args.n_iter, n_samples=args.n_samples) + ".{}.obj"
         _interp = ["nn", "linear_fast"] if args.two_nets else "linear_fast"
-        _atk_vn = load_vn(_name.format("atk_vn"), _interp)
-        _dfd_vn = load_vn(_name.format("dfd_vn"), _interp)
+        _atk_vn = load_vn(_name.format("atk_vn"), "linear_fast")
+        _dfd_vn = load_vn(_name.format("dfd_vn"), "linear_fast")
         try:
-            _atk_sn = load_vn(_name.format("atk_sn"), _interp)
-            _dfd_sn = load_vn(_name.format("dfd_sn"), _interp)
+            _atk_sn = load_vn(_name.format("atk_sn"), "linear_fast")
+            _dfd_sn = load_vn(_name.format("dfd_sn"), "linear_fast")
         except FileNotFoundError:
             _atk_sn = None
             _dfd_sn = None
@@ -990,6 +1006,7 @@ def main():
             atk_tss = np.array(atk_tss).reshape(n, env.n_types * env.n_slots)
             dfd_tss = np.array(dfd_tss).reshape(n, env.n_slots)
             name = "data/" + get_filename(args) + ".{}.obj"
+            # print(name)
             np.concatenate([ps, avs], axis=1).dump(name.format("atk_vn"))
             np.concatenate([ps, dvs.reshape(n, 1)], axis=1).dump(name.format("dfd_vn"))
             np.concatenate([ps, atk_tss], axis=1).dump(name.format("atk_sn"))
